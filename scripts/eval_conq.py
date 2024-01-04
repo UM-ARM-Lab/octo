@@ -85,6 +85,11 @@ class ConqGymEnv(gym.Env):
     def __init__(self, im_size, blocking):
         self.im_size = im_size
         self.blocking = blocking
+
+        self.observation_space = gym.spaces.Dict({
+            # TODO: add proprio
+            'image_primary': gym.spaces.Box(low=0, high=255, shape=(self.im_size, self.im_size, 3), dtype=np.uint8),
+        })
         
         # TODO: setup conq
 
