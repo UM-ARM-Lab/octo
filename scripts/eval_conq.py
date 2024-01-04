@@ -52,8 +52,7 @@ flags.DEFINE_integer("im_size", None, "Image size", required=True)
 flags.DEFINE_string("video_save_path", None, "Path to save video")
 flags.DEFINE_integer("num_timesteps", 120, "num timesteps")
 flags.DEFINE_integer("horizon", 1, "Observation history length")
-flags.DEFINE_integer("pred_horizon", 1, "Length of action sequence from model")
-flags.DEFINE_integer("exec_horizon", 1, "Length of action sequence to execute")
+flags.DEFINE_integer("exec_horizon", 3, "Length of action sequence to execute")
 
 # show image flag
 flags.DEFINE_bool("show_image", False, "Show image")
@@ -136,6 +135,7 @@ class ConqGymEnv(gym.Env):
         return obs
 
     def step(self, action: ActType) -> Tuple[ObsType, float, bool, bool, dict]:
+        t0 = time.time()
         # Action is an 8 dim vector, and if you look at the features.json you'll find its meaning:
         # [ dx, dy, dz, droll, dpitch, dyaw, open_fraction, is_terminal ]
         # where the delta position and orientation is in the current body frame
@@ -180,16 +180,18 @@ class ConqGymEnv(gym.Env):
         cmd_with_gripper = RobotCommandBuilder.build_synchro_command(cmd, gripper_cmd)
         logging.debug(cmd_with_gripper)
 
-        # Execute!
-        self.clients.command.robot_command(cmd_with_gripper)
-
         # rerun logging
         viz_common_frames(snapshot)
         rr_tform('current_hand', hand_in_vision)
         rr_tform('new_hand', new_hand_in_vision)
         rr.log("gripper/open_fraction", open_fraction)
 
+        # Execute!
+        self.clients.command.robot_command(cmd_with_gripper)
+
         obs = self.get_obs()
+        t1 = time.time()
+        print(f"one step time {t1 - t0:.3f}")
 
         # FIXME: how to set trunc? Are we sure it should be the same as "is_terminal" in the action?
         trunc = False
@@ -227,7 +229,7 @@ def main(_):
     # wrap the robot environment
     env = ConqGymEnv(clients, FLAGS.im_size, FLAGS.blocking)
     env = add_octo_env_wrappers(env, model.config, dict(model.dataset_statistics), normalization_type="normal",
-                                resize_size=(FLAGS.im_size, FLAGS.im_size))
+                                resize_size=(FLAGS.im_size, FLAGS.im_size), exec_horizon=FLAGS.exec_horizon)
 
     rng = jax.random.PRNGKey(1)
     goal_instruction = "grasp hose"
@@ -280,15 +282,15 @@ def main(_):
                         break
 
             # save video
-            if FLAGS.video_save_path is not None:
-                os.makedirs(FLAGS.video_save_path, exist_ok=True)
-                curr_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                save_path = os.path.join(
-                    FLAGS.video_save_path,
-                    f"{curr_time}.mp4",
-                )
-                video = np.concatenate([np.stack(images)], axis=1)
-                imageio.mimsave(save_path, video, fps=1.0 / STEP_DURATION * 3)
+            # if FLAGS.video_save_path is not None:
+            #     os.makedirs(FLAGS.video_save_path, exist_ok=True)
+            #     curr_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            #     save_path = os.path.join(
+            #         FLAGS.video_save_path,
+            #         f"{curr_time}.mp4",
+            #     )
+            #     video = np.concatenate([np.stack(images)], axis=1)
+            #     imageio.mimsave(save_path, video, fps=1.0 / STEP_DURATION * 3)
 
 
 if __name__ == "__main__":
