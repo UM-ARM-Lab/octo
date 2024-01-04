@@ -3,30 +3,30 @@ import time
 from datetime import datetime
 from typing import Optional, Tuple
 
+from scipy.spatial.transform import Rotation as Rot
 import bosdyn.client
 import cv2
+import gym
 import imageio
 import jax
 import numpy as np
 from absl import app, flags, logging
-from bosdyn.client import Robot
-from bosdyn.client.frame_helpers import get_a_tform_b, VISION_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME
+from bosdyn.client.frame_helpers import get_a_tform_b, VISION_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME, HAND_FRAME_NAME
 from bosdyn.client.image import ImageClient
 from bosdyn.client.lease import LeaseKeepAlive, LeaseClient
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
+from bosdyn.client.math_helpers import quat_to_eulerZYX, SE3Velocity, SE3Pose, Quat
 from bosdyn.client.robot_command import RobotCommandBuilder
 from bosdyn.client.robot_state import RobotStateClient
-from conq.clients import Clients
 from conq.cameras_utils import get_color_img
+from conq.clients import Clients
 from conq.data_recorder import get_state_vec
-from conq.hand_motion import hand_pose_cmd_in_frame
 from conq.manipulation import open_gripper, add_follow_with_body
 from conq.utils import setup_and_stand
 from gym.core import ObsType, ActType
 
 from octo.model.octo_model import OctoModel
-from octo.utils.gym_wrappers import HistoryWrapper, RHCWrapper, UnnormalizeActionProprio, ResizeImageWrapper, \
-    add_octo_env_wrappers
+from octo.utils.gym_wrappers import add_octo_env_wrappers
 
 np.set_printoptions(suppress=True)
 
@@ -75,10 +75,12 @@ ENV_PARAMS = {
     "move_duration": STEP_DURATION,
 }
 
+
 ##############################################################################
 
 
-import gym
+def euler_to_quat(euler):
+    return Rot.from_euler("XYZ", euler).as_quat().tolist()
 
 
 class ConqGymEnv(gym.Env):
@@ -94,7 +96,6 @@ class ConqGymEnv(gym.Env):
             'proprio': gym.spaces.Box(low=-np.inf, high=np.inf, shape=(66,), dtype=np.float32),
         })
         self.action_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32)
-
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[ObsType, dict]:
         obs = self.get_obs()
@@ -112,27 +113,62 @@ class ConqGymEnv(gym.Env):
         return obs
 
     def step(self, action: ActType) -> Tuple[ObsType, float, bool, bool, dict]:
-        # convert action into "pose"
+        # Action is an 8 dim vector, and if you look at the features.json you'll find its meaning:
+        # [ dx, dy, dz, droll, dpitch, dyaw, open_fraction, is_terminal ]
+        # where the delta position and orientation is in the current body frame
+        vel_in_body = SE3Velocity(action[0], action[1], action[2], action[3], action[4], action[5])
 
-        cmd = RobotCommandBuilder.arm_ready_command()
-        self.clients.command.robot_command(cmd)
-        open_gripper(self.clients)
+        state = self.clients.state.get_robot_state()
+        snapshot = state.kinematic_state.transforms_snapshot
+        hand_in_vision = get_a_tform_b(snapshot, HAND_FRAME_NAME, VISION_FRAME_NAME)
+        body_in_vision = get_a_tform_b(snapshot, VISION_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
 
-        transforms0 = self.clients.state.get_robot_state().kinematic_state.transforms_snapshot
-        body_in_vision0 = get_a_tform_b(transforms0, VISION_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
+        from bosdyn.client.math_helpers import transform_se3velocity
+        vel_in_vision = transform_se3velocity(body_in_vision.to_adjoint_matrix(), vel_in_body)
 
-        x, y, z, roll, pitch, yaw = pose
+        # First we're going to take the deltas in current body frame, and transform those into deltas in vision frame
+        # by applying the transform body_in_vision to them.
 
-        arm_cmd = hand_pose_cmd_in_frame(body_in_vision0, x, y, z, roll, pitch, yaw, duration=2 * STEP_DURATION)
+        euler_zyx = quat_to_eulerZYX(hand_in_vision.rotation)
+        x = hand_in_vision.x + vel_in_vision.linear.x
+        y = hand_in_vision.y + vel_in_vision.linear.y
+        z = hand_in_vision.z + vel_in_vision.linear.z
+        roll = euler_zyx[2] + vel_in_vision.angular.x
+        pitch = euler_zyx[1] + vel_in_vision.angular.y
+        yaw = euler_zyx[0] + vel_in_vision.angular.z
+        new_euler_xyz_in_vision = [roll, pitch, yaw]
+
+        new_quat_in_vision = Quat(*euler_to_quat(new_euler_xyz_in_vision))
+
+        new_hand_in_vision = SE3Pose(
+            x=hand_in_vision.x + vel_in_vision.linear.x,
+            y=hand_in_vision.y + vel_in_vision.linear.y,
+            z=hand_in_vision.z + vel_in_vision.linear.z,
+            rot=new_quat_in_vision,
+        )
+        print(hand_in_vision)
+        print(new_hand_in_vision)
+
+        arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(new_hand_in_vision.to_proto(), VISION_FRAME_NAME,
+                                                                 seconds=2 * STEP_DURATION)
         cmd = add_follow_with_body(arm_cmd)
         cmd.synchronized_command.arm_command.arm_cartesian_command.max_linear_velocity.value = 0.3
 
+        # add gripper command
+        open_fraction = action[6]
+        # limiting for initial testing
+        open_fraction = np.clip(open_fraction, 0.1, 0.9)
+        gripper_cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(open_fraction)
+        cmd_with_gripper = RobotCommandBuilder.build_synchro_command(cmd, gripper_cmd)
+        print(cmd_with_gripper)
+
         # Execute!
-        self.clients.command.robot_command(cmd)
+        time.sleep(3)
+        self.clients.command.robot_command(cmd_with_gripper)
 
         obs = self.get_obs()
 
-        # FIXME: how to set trunc?
+        # FIXME: how to set trunc? Are we sure it should be the same as "is_terminal" in the action?
         trunc = False
         return obs, 0.0, False, trunc, {}
 
@@ -154,7 +190,7 @@ def main(_):
     command_client = setup_and_stand(robot)
 
     clients = Clients(lease=lease_client, state=robot_state_client, manipulation=manipulation_api_client,
-                           image=image_client, raycast=None, command=command_client, robot=robot, recorder=None)
+                      image=image_client, raycast=None, command=command_client, robot=robot, recorder=None)
 
     # load models
     model = OctoModel.load_pretrained(
@@ -164,12 +200,17 @@ def main(_):
 
     # wrap the robot environment
     env = ConqGymEnv(clients, FLAGS.im_size, FLAGS.blocking)
-    env = add_octo_env_wrappers(env, model.config, dict(model.dataset_statistics), normalization_type="normal")
+    env = add_octo_env_wrappers(env, model.config, dict(model.dataset_statistics), normalization_type="normal",
+                                resize_size=(FLAGS.im_size, FLAGS.im_size))
 
     rng = jax.random.PRNGKey(1)
     goal_instruction = "grasp hose"
 
-    with (LeaseKeepAlive(env.lease_client, must_acquire=True, return_at_exit=True)):
+    with (LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True)):
+        cmd = RobotCommandBuilder.arm_ready_command()
+        clients.command.robot_command(cmd)
+        open_gripper(clients)
+
         while True:
             task = model.create_tasks(texts=[goal_instruction])
 

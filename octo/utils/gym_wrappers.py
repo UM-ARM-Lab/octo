@@ -68,12 +68,10 @@ def add_octo_env_wrappers(
         resize_size: None or tuple or list of tuples for ResizeImageWrapper
         horizon: int for HistoryWrapper
     """
-    normalization_type = kwargs.get(
-        "normalization_type",
-        config["dataset_kwargs"]["common_dataset_kwargs"][
-            "action_proprio_normalization_type"
-        ],
-    )
+    if "normalization_type" in kwargs:
+        normalization_type = kwargs['normalization_type']
+    else:
+        normalization_type = config["dataset_kwargs"]["common_dataset_kwargs"]["action_proprio_normalization_type"]
 
     logging.info(
         "Unnormalizing proprio and actions w/ statistics: ", dataset_statistics
@@ -222,6 +220,7 @@ class ResizeImageWrapper(gym.ObservationWrapper):
             self.observation_space, gym.spaces.Dict
         ), "Only Dict observation spaces are supported."
         spaces = self.observation_space.spaces
+        self.resize_size = resize_size
 
         if resize_size is None:
             self.keys_to_resize = {}
