@@ -130,8 +130,6 @@ def main(_):
     policy_fn = partial(
         sample_actions,
         model,
-        argmax=FLAGS.deterministic,
-        temperature=FLAGS.temperature,
     )
 
     goal_image = jnp.zeros((FLAGS.im_size, FLAGS.im_size, 3), dtype=np.uint8)
