@@ -1,9 +1,9 @@
 import os
+import rerun as rr
 import time
 from datetime import datetime
 from typing import Optional, Tuple
 
-from scipy.spatial.transform import Rotation as Rot
 import bosdyn.client
 import cv2
 import gym
@@ -15,20 +15,22 @@ from bosdyn.client.frame_helpers import get_a_tform_b, VISION_FRAME_NAME, GRAV_A
 from bosdyn.client.image import ImageClient
 from bosdyn.client.lease import LeaseKeepAlive, LeaseClient
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
-from bosdyn.client.math_helpers import quat_to_eulerZYX, SE3Velocity, SE3Pose, Quat
+from bosdyn.client.math_helpers import quat_to_eulerZYX, SE3Velocity, SE3Pose, Quat, Vec3
 from bosdyn.client.robot_command import RobotCommandBuilder
 from bosdyn.client.robot_state import RobotStateClient
 from conq.cameras_utils import get_color_img
 from conq.clients import Clients
 from conq.data_recorder import get_state_vec
-from conq.manipulation import open_gripper, add_follow_with_body
+from conq.hand_motion import hand_pose_cmd
+from conq.manipulation import open_gripper, add_follow_with_body, blocking_arm_command
 from conq.utils import setup_and_stand
 from gym.core import ObsType, ActType
+from scipy.spatial.transform import Rotation as Rot
 
 from octo.model.octo_model import OctoModel
 from octo.utils.gym_wrappers import add_octo_env_wrappers
 
-np.set_printoptions(suppress=True)
+np.set_printoptions(suppress=True, precision=4)
 
 logging.set_verbosity(logging.WARNING)
 
@@ -79,8 +81,29 @@ ENV_PARAMS = {
 ##############################################################################
 
 
-def euler_to_quat(euler):
-    return Rot.from_euler("XYZ", euler).as_quat().tolist()
+def my_euler_to_quat(euler):
+    q_xyzw = Rot.from_euler("xyz", euler, degrees=False).as_quat().tolist()
+    q_wxyz = [q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]]
+    return q_wxyz
+
+
+def my_quat_to_euler(q):
+    euler = Rot.from_quat([q.x, q.y, q.z, q.w]).as_euler("xyz", degrees=False).tolist()
+    return euler
+
+
+def viz_common_frames(snapshot):
+    body_in_vision = get_a_tform_b(snapshot, VISION_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
+    hand_in_vision = get_a_tform_b(snapshot, VISION_FRAME_NAME, HAND_FRAME_NAME)
+    rr_tform('body', body_in_vision)
+    rr_tform('hand', hand_in_vision)
+    rr.log(f'frames/vision', rr.Transform3D(translation=[0, 0, 0]))
+
+
+def rr_tform(child_frame: str, tform: SE3Pose):
+    translation = np.array([tform.position.x, tform.position.y, tform.position.z])
+    rot_mat = tform.rotation.to_matrix()
+    rr.log(f"frames/{child_frame}", rr.Transform3D(rr.TranslationAndMat3x3(translation, rot_mat)))
 
 
 class ConqGymEnv(gym.Env):
@@ -116,55 +139,55 @@ class ConqGymEnv(gym.Env):
         # Action is an 8 dim vector, and if you look at the features.json you'll find its meaning:
         # [ dx, dy, dz, droll, dpitch, dyaw, open_fraction, is_terminal ]
         # where the delta position and orientation is in the current body frame
-        vel_in_body = SE3Velocity(action[0], action[1], action[2], action[3], action[4], action[5])
+        # First we're going to take the deltas in current body frame, and transform those into deltas in vision frame
+        delta_pose_in_body = SE3Pose(
+            x=action[0],
+            y=action[1],
+            z=action[2],
+            rot=Quat(*my_euler_to_quat([action[3], action[4], action[5]])),
+        )
 
         state = self.clients.state.get_robot_state()
         snapshot = state.kinematic_state.transforms_snapshot
-        hand_in_vision = get_a_tform_b(snapshot, HAND_FRAME_NAME, VISION_FRAME_NAME)
+        hand_in_vision = get_a_tform_b(snapshot, VISION_FRAME_NAME, HAND_FRAME_NAME)
         body_in_vision = get_a_tform_b(snapshot, VISION_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
 
-        from bosdyn.client.math_helpers import transform_se3velocity
-        vel_in_vision = transform_se3velocity(body_in_vision.to_adjoint_matrix(), vel_in_body)
+        # The delta pose just needs to be rotated
+        delta_pose_in_vision_rot = body_in_vision.rotation * delta_pose_in_body.rotation
+        delta_pose_in_vision_trans = body_in_vision.rotation * Vec3.from_proto(delta_pose_in_body.position)
+        delta_pose_in_vision = SE3Pose(delta_pose_in_vision_trans.x,
+                                       delta_pose_in_vision_trans.y,
+                                       delta_pose_in_vision_trans.z,
+                                       delta_pose_in_vision_rot)
+        logging.debug(delta_pose_in_body)
+        logging.debug(delta_pose_in_vision)
 
-        # First we're going to take the deltas in current body frame, and transform those into deltas in vision frame
-        # by applying the transform body_in_vision to them.
+        new_hand_in_vision = delta_pose_in_vision * hand_in_vision
 
-        euler_zyx = quat_to_eulerZYX(hand_in_vision.rotation)
-        x = hand_in_vision.x + vel_in_vision.linear.x
-        y = hand_in_vision.y + vel_in_vision.linear.y
-        z = hand_in_vision.z + vel_in_vision.linear.z
-        roll = euler_zyx[2] + vel_in_vision.angular.x
-        pitch = euler_zyx[1] + vel_in_vision.angular.y
-        yaw = euler_zyx[0] + vel_in_vision.angular.z
-        new_euler_xyz_in_vision = [roll, pitch, yaw]
-
-        new_quat_in_vision = Quat(*euler_to_quat(new_euler_xyz_in_vision))
-
-        new_hand_in_vision = SE3Pose(
-            x=hand_in_vision.x + vel_in_vision.linear.x,
-            y=hand_in_vision.y + vel_in_vision.linear.y,
-            z=hand_in_vision.z + vel_in_vision.linear.z,
-            rot=new_quat_in_vision,
-        )
-        print(hand_in_vision)
-        print(new_hand_in_vision)
 
         arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(new_hand_in_vision.to_proto(), VISION_FRAME_NAME,
                                                                  seconds=2 * STEP_DURATION)
+
         cmd = add_follow_with_body(arm_cmd)
         cmd.synchronized_command.arm_command.arm_cartesian_command.max_linear_velocity.value = 0.3
 
-        # add gripper command
+        # Add gripper command
         open_fraction = action[6]
-        # limiting for initial testing
+        # FIXME: limiting for initial testing!!!
         open_fraction = np.clip(open_fraction, 0.1, 0.9)
+
         gripper_cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(open_fraction)
         cmd_with_gripper = RobotCommandBuilder.build_synchro_command(cmd, gripper_cmd)
-        print(cmd_with_gripper)
+        logging.debug(cmd_with_gripper)
 
         # Execute!
-        time.sleep(3)
         self.clients.command.robot_command(cmd_with_gripper)
+
+        # rerun logging
+        viz_common_frames(snapshot)
+        rr_tform('current_hand', hand_in_vision)
+        rr_tform('new_hand', new_hand_in_vision)
+        rr.log("gripper/open_fraction", open_fraction)
 
         obs = self.get_obs()
 
@@ -179,6 +202,9 @@ def main(_):
     robot = sdk.create_robot("192.168.80.3")
     bosdyn.client.util.authenticate(robot)
     robot.time_sync.wait_for_sync()
+
+    rr.init('eval')
+    rr.connect()
 
     lease_client = robot.ensure_client(LeaseClient.default_service_name)
     robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
@@ -207,8 +233,8 @@ def main(_):
     goal_instruction = "grasp hose"
 
     with (LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True)):
-        cmd = RobotCommandBuilder.arm_ready_command()
-        clients.command.robot_command(cmd)
+        look_cmd = hand_pose_cmd(clients, 0.5, 0, 0.4, 0, np.deg2rad(75), 0, duration=1)
+        blocking_arm_command(clients, look_cmd)
         open_gripper(clients)
 
         while True:
