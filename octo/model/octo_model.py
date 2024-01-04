@@ -57,7 +57,7 @@ class OctoModel:
             )  # initializes params
         >>> # Continue as in finetuning example
 
-    See full usage examples in train.py and finetune.py.
+    See full usage examples in scripts/train.py and scripts/finetune.py.
 
     """
 

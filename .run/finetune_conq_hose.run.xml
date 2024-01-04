@@ -14,8 +14,8 @@
     <option name="ADD_CONTENT_ROOTS" value="true" />
     <option name="ADD_SOURCE_ROOTS" value="true" />
     <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
-    <option name="SCRIPT_NAME" value="$PROJECT_DIR$/examples/finetune_conq_hose.py" />
-    <option name="PARAMETERS" value="--data_dir=/home/peter/tensorflow_datasets/ --pretrained_path=hf://rail-berkeley/octo-small --save_dir=/home/peter/Documents/octo/checkpoints" />
+    <option name="SCRIPT_NAME" value="$PROJECT_DIR$/scripts/finetune_conq_hose.py" />
+    <option name="PARAMETERS" value="--data_dir=$USER_HOME$/tensorflow_datasets/ --pretrained_path=hf://rail-berkeley/octo-small --save_dir=$PROJECT_DIR$/checkpoints" />
     <option name="SHOW_COMMAND_LINE" value="false" />
     <option name="EMULATE_TERMINAL" value="false" />
     <option name="MODULE_MODE" value="false" />
