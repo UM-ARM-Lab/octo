@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 from absl import app, flags, logging
 import flax
 import jax
@@ -41,6 +44,7 @@ def get_cpu_mem():
     import psutil
     return psutil.virtual_memory().available * 100 / psutil.virtual_memory().total
 
+
 def get_gpu_mem():
     import pynvml
     pynvml.nvmlInit()
@@ -48,10 +52,13 @@ def get_gpu_mem():
     info = pynvml.nvmlDeviceGetMemoryInfo(handle)
     return info.free * 100 / info.total
 
+
 def main(_):
     assert (
-        FLAGS.batch_size % jax.device_count() == 0
+            FLAGS.batch_size % jax.device_count() == 0
     ), "Batch size must be divisible by device count."
+
+    dataset_name = "conq_hose_manipulation_dataset"
 
     initialize_compilation_cache()
     # prevent tensorflow from using GPU memory since it's only used for data loading
@@ -60,9 +67,13 @@ def main(_):
     # setup wandb for logging
     wandb.init(name="finetune_conq_hose", project="octo")
     wandb.config.update(flags.FLAGS)
+    wandb.config["dataset_name"] = dataset_name
 
     # load pre-trained model
     logging.info("Loading pre-trained model...")
+    if not os.path.exists(FLAGS.pretrained_path):
+        raise ValueError(f"pretrained_path {FLAGS.pretrained_path} does not exist.")
+
     pretrained_model = OctoModel.load_pretrained(FLAGS.pretrained_path)
 
     # make finetuning dataset
@@ -72,7 +83,7 @@ def main(_):
     new_action_dim = 8
     dataset = make_single_dataset(
         dataset_kwargs=dict(
-            name="conq_hose_manipulation_dataset",
+            name=dataset_name,
             data_dir=FLAGS.data_dir,
             image_obs_keys={"primary": "hand_color_image"},
             state_obs_keys=["state"],
@@ -190,6 +201,8 @@ def main(_):
         return new_state, info
 
     # run finetuning loop
+    checkpoint_path = Path(FLAGS.save_dir) / wandb.run.id
+    checkpoint_path.mkdir(parents=True, exist_ok=True)
     logging.info("Starting finetuning...")
     for i in tqdm.tqdm(range(FLAGS.n_steps), total=FLAGS.n_steps, dynamic_ncols=True):
         batch = next(train_data_iter)
@@ -200,13 +213,11 @@ def main(_):
                 flax.traverse_util.flatten_dict({"training": update_info}, sep="/"),
                 step=i,
             )
-        if (i + 1) % 1000 == 0:
+            # TODO: log model artifacts to wandb
+        if i > 0 and i % 1000 == 0:
             # save checkpoint
-            train_state.model.save_pretrained(step=i, checkpoint_path=FLAGS.save_dir)
-        if (i + 1) % 100 == 0:
-            # Print how much GPU and CPU memory is available
-            print(get_cpu_mem())
-            print(get_gpu_mem())
+            train_state.model.save_pretrained(step=i, checkpoint_path=checkpoint_path)
+
 
 if __name__ == "__main__":
     app.run(main)

@@ -18,6 +18,7 @@ import wandb
 
 from octo.model.octo_model import OctoModel
 from octo.utils.gym_wrappers import HistoryWrapper, RHCWrapper, UnnormalizeActionProprio
+from examples.envs import aloha_sim_env
 
 FLAGS = flags.FLAGS
 

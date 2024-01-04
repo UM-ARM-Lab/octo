@@ -323,28 +323,25 @@ class OctoModel:
         if jax.process_index() == 0:
             # save config
             config_path = tf.io.gfile.join(checkpoint_path, "config.json")
-            if not tf.io.gfile.exists(config_path):
-                with tf.io.gfile.GFile(config_path, "w") as f:
-                    json.dump(self.config, f)
+            with tf.io.gfile.GFile(config_path, "w") as f:
+                json.dump(self.config, f)
 
             # save example batch
             example_batch_path = tf.io.gfile.join(
                 checkpoint_path, "example_batch.msgpack"
             )
-            if not tf.io.gfile.exists(example_batch_path):
-                with tf.io.gfile.GFile(example_batch_path, "wb") as f:
-                    f.write(flax.serialization.msgpack_serialize(self.example_batch))
+            with tf.io.gfile.GFile(example_batch_path, "wb") as f:
+                f.write(flax.serialization.msgpack_serialize(self.example_batch))
 
             # save dataset statistics
             dataset_statistics_path = tf.io.gfile.join(
                 checkpoint_path, "dataset_statistics.json"
             )
-            if not tf.io.gfile.exists(dataset_statistics_path):
-                with tf.io.gfile.GFile(dataset_statistics_path, "w") as f:
-                    json.dump(
-                        jax.tree_map(lambda x: x.tolist(), self.dataset_statistics),
-                        f,
-                    )
+            with tf.io.gfile.GFile(dataset_statistics_path, "w") as f:
+                json.dump(
+                    jax.tree_map(lambda x: x.tolist(), self.dataset_statistics),
+                    f,
+                )
 
     @classmethod
     def from_config(
