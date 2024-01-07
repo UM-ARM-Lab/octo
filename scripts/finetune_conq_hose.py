@@ -31,7 +31,8 @@ flags.DEFINE_string(
 flags.DEFINE_string("data_dir", None, "Path to finetuning dataset, in RLDS format.")
 flags.DEFINE_string("save_dir", None, "Directory for saving finetuning checkpoints.")
 flags.DEFINE_integer("batch_size", 32, "Batch size for finetuning.")
-flags.DEFINE_integer("n_steps", 10_000, "Number of batches to finetune for.")
+flags.DEFINE_integer("n_steps", 500_000, "Number of batches to finetune for.")
+flags.DEFINE_integer("pred_horizon", 50, "Number of batches to finetune for.")
 
 flags.DEFINE_bool(
     "freeze_transformer",
@@ -58,7 +59,7 @@ def main(_):
             FLAGS.batch_size % jax.device_count() == 0
     ), "Batch size must be divisible by device count."
 
-    dataset_name = "conq_hose_manipulation_dataset"
+    dataset_name = "conq_hose_manipulation:1.2.0"
 
     initialize_compilation_cache()
     # prevent tensorflow from using GPU memory since it's only used for data loading
@@ -71,16 +72,12 @@ def main(_):
 
     # load pre-trained model
     logging.info("Loading pre-trained model...")
-    if not os.path.exists(FLAGS.pretrained_path):
-        raise ValueError(f"pretrained_path {FLAGS.pretrained_path} does not exist.")
-
     pretrained_model = OctoModel.load_pretrained(FLAGS.pretrained_path)
 
     # make finetuning dataset
-    # apply Gaussian normalization, load chunks of 50 actions since we'll train with action chunking
+    # apply Gaussian normalization, load chunks of `pred_horizon` actions since we'll train with action chunking
     # delete goal images in the data loader since we will train a language-conditioned-only policy
     logging.info("Loading finetuning dataset...")
-    new_action_dim = 8
     dataset = make_single_dataset(
         dataset_kwargs=dict(
             name=dataset_name,
@@ -89,11 +86,11 @@ def main(_):
             state_obs_keys=["state"],
             language_key="language_instruction",
             action_proprio_normalization_type=NormalizationType.NORMAL,
-            absolute_action_mask=[True] * new_action_dim,
+            absolute_action_mask=[False, False, False, False, False, False, True, True],
         ),
         traj_transform_kwargs=dict(
             window_size=1,
-            future_action_window_size=49,  # so we get 50 actions for our action chunk
+            future_action_window_size=FLAGS.pred_horizon - 1,  # so we get pred_horizon actions for our action chunk
         ),
         frame_transform_kwargs=dict(
             resize_size={"primary": (256, 256)},
@@ -120,7 +117,6 @@ def main(_):
     example_batch = next(train_data_iter)
 
     # load pre-training config and modify --> remove wrist cam, add proprio input, change action head
-    # following Zhao et al. we use "action chunks" of length 50 and L1 loss for ALOHA
     config = pretrained_model.config
     del config["model"]["observation_tokenizers"]["wrist"]
     ###
@@ -136,9 +132,8 @@ def main(_):
     # Fully override the old action head with a new one (for smaller changes, you can use update_module_config)
     config["model"]["heads"]["action"] = ModuleSpec.create(
         L1ActionHead,
-        # FIXME: 50 seems a bit long? how long does 50 steps correspond to for my dataset?
-        pred_horizon=50,
-        action_dim=new_action_dim,
+        pred_horizon=FLAGS.pred_horizon,
+        action_dim=example_batch["action"].shape[-1],
         readout_key="readout_action",
     )
 

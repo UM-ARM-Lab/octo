@@ -1,21 +1,21 @@
-import os
+from copy import copy
+
 import rerun as rr
 import time
-from datetime import datetime
 from typing import Optional, Tuple
 
 import bosdyn.client
 import cv2
 import gym
-import imageio
 import jax
 import numpy as np
+import rerun as rr
 from absl import app, flags, logging
 from bosdyn.client.frame_helpers import get_a_tform_b, VISION_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME, HAND_FRAME_NAME
 from bosdyn.client.image import ImageClient
 from bosdyn.client.lease import LeaseKeepAlive, LeaseClient
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
-from bosdyn.client.math_helpers import quat_to_eulerZYX, SE3Velocity, SE3Pose, Quat, Vec3
+from bosdyn.client.math_helpers import SE3Pose, Quat, Vec3
 from bosdyn.client.robot_command import RobotCommandBuilder
 from bosdyn.client.robot_state import RobotStateClient
 from conq.cameras_utils import get_color_img
@@ -52,7 +52,7 @@ flags.DEFINE_integer("im_size", None, "Image size", required=True)
 flags.DEFINE_string("video_save_path", None, "Path to save video")
 flags.DEFINE_integer("num_timesteps", 120, "num timesteps")
 flags.DEFINE_integer("horizon", 1, "Observation history length")
-flags.DEFINE_integer("exec_horizon", 3, "Length of action sequence to execute")
+flags.DEFINE_integer("exec_horizon", 10, "Length of action sequence to execute")
 
 # show image flag
 flags.DEFINE_bool("show_image", False, "Show image")
@@ -127,64 +127,21 @@ class ConqGymEnv(gym.Env):
         state = self.clients.state.get_robot_state()
         prioprio = get_state_vec(state)
         image_primary, _ = get_color_img(self.clients.image, "hand_color_image")
-        # TODO: resize img to im_size,im_size?
         obs = {
             'image_primary': image_primary,
             'proprio': prioprio,
+            # NOTE: we get a warning if we don't pad the mask, but it seems to work fine without it,
+            #  and trying to add it causes other issues
+            # 'pad_mask_dict': {
+            #     'image_primary': np.ones((self.im_size, self.im_size)),
+            #     'proprio': np.ones((66,)),
+            # }
         }
         return obs
 
     def step(self, action: ActType) -> Tuple[ObsType, float, bool, bool, dict]:
         t0 = time.time()
-        # Action is an 8 dim vector, and if you look at the features.json you'll find its meaning:
-        # [ dx, dy, dz, droll, dpitch, dyaw, open_fraction, is_terminal ]
-        # where the delta position and orientation is in the current body frame
-        # First we're going to take the deltas in current body frame, and transform those into deltas in vision frame
-        delta_pose_in_body = SE3Pose(
-            x=action[0],
-            y=action[1],
-            z=action[2],
-            rot=Quat(*my_euler_to_quat([action[3], action[4], action[5]])),
-        )
-
-        state = self.clients.state.get_robot_state()
-        snapshot = state.kinematic_state.transforms_snapshot
-        hand_in_vision = get_a_tform_b(snapshot, VISION_FRAME_NAME, HAND_FRAME_NAME)
-        body_in_vision = get_a_tform_b(snapshot, VISION_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
-
-        # The delta pose just needs to be rotated
-        delta_pose_in_vision_rot = body_in_vision.rotation * delta_pose_in_body.rotation
-        delta_pose_in_vision_trans = body_in_vision.rotation * Vec3.from_proto(delta_pose_in_body.position)
-        delta_pose_in_vision = SE3Pose(delta_pose_in_vision_trans.x,
-                                       delta_pose_in_vision_trans.y,
-                                       delta_pose_in_vision_trans.z,
-                                       delta_pose_in_vision_rot)
-        logging.debug(delta_pose_in_body)
-        logging.debug(delta_pose_in_vision)
-
-        new_hand_in_vision = delta_pose_in_vision * hand_in_vision
-
-
-        arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(new_hand_in_vision.to_proto(), VISION_FRAME_NAME,
-                                                                 seconds=2 * STEP_DURATION)
-
-        cmd = add_follow_with_body(arm_cmd)
-        cmd.synchronized_command.arm_command.arm_cartesian_command.max_linear_velocity.value = 0.3
-
-        # Add gripper command
-        open_fraction = action[6]
-        # FIXME: limiting for initial testing!!!
-        open_fraction = np.clip(open_fraction, 0.1, 0.9)
-
-        gripper_cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(open_fraction)
-        cmd_with_gripper = RobotCommandBuilder.build_synchro_command(cmd, gripper_cmd)
-        logging.debug(cmd_with_gripper)
-
-        # rerun logging
-        viz_common_frames(snapshot)
-        rr_tform('current_hand', hand_in_vision)
-        rr_tform('new_hand', new_hand_in_vision)
-        rr.log("gripper/open_fraction", open_fraction)
+        cmd_with_gripper = self.model_action_to_conq_cmd(action)
 
         # Execute!
         self.clients.command.robot_command(cmd_with_gripper)
@@ -196,6 +153,47 @@ class ConqGymEnv(gym.Env):
         # FIXME: how to set trunc? Are we sure it should be the same as "is_terminal" in the action?
         trunc = False
         return obs, 0.0, False, trunc, {}
+
+    def model_action_to_conq_cmd(self, action):
+        state = self.clients.state.get_robot_state()
+        snapshot = state.kinematic_state.transforms_snapshot
+        hand_in_vision = get_a_tform_b(snapshot, VISION_FRAME_NAME, HAND_FRAME_NAME)
+        body_in_vision = get_a_tform_b(snapshot, VISION_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
+        hand_in_body = get_a_tform_b(snapshot, GRAV_ALIGNED_BODY_FRAME_NAME, HAND_FRAME_NAME)
+
+        new_hand_in_vision = self.get_new_hand_in_vision(action, body_in_vision, hand_in_body)
+
+        arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(new_hand_in_vision.to_proto(), VISION_FRAME_NAME,
+                                                                 seconds=2 * STEP_DURATION)
+        cmd = arm_cmd
+        # cmd = add_follow_with_body(arm_cmd)
+        # cmd.synchronized_command.arm_command.arm_cartesian_command.max_linear_velocity.value = 0.3
+
+        # Add gripper command
+        open_fraction = action[6]
+        gripper_cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(open_fraction)
+        cmd_with_gripper = RobotCommandBuilder.build_synchro_command(cmd, gripper_cmd)
+
+        # rerun logging
+        viz_common_frames(snapshot)
+        rr_tform('current_hand', hand_in_vision)
+        rr_tform('new_hand', new_hand_in_vision)
+        rr.log("gripper/open_fraction", rr.TimeSeriesScalar(open_fraction))
+        return cmd_with_gripper
+
+    @staticmethod
+    def get_new_hand_in_vision(action, body_in_vision, hand_in_body):
+        # Action is an 8 dim vector, and if you look at the features.json you'll find its meaning:
+        # [ dx, dy, dz, droll, dpitch, dyaw, open_fraction, is_terminal ]
+        # where the delta position and orientation is in the current body frame
+        # First we're going to take the deltas in current body frame,
+        # and apply it to the current hand in body frame to get the new hand in body frame
+        delta_pose_in_body = SE3Pose(x=action[0], y=action[1], z=action[2],
+                                     rot=Quat(*my_euler_to_quat([action[3], action[4], action[5]])))
+        new_hand_in_body = delta_pose_in_body * hand_in_body
+        # Now we need to transform the new hand in body frame into the new hand in vision frame
+        new_hand_in_vision = body_in_vision * new_hand_in_body
+        return new_hand_in_vision
 
 
 def main(_):
@@ -230,6 +228,66 @@ def main(_):
     env = ConqGymEnv(clients, FLAGS.im_size, FLAGS.blocking)
     env = add_octo_env_wrappers(env, model.config, dict(model.dataset_statistics), normalization_type="normal",
                                 resize_size=(FLAGS.im_size, FLAGS.im_size), exec_horizon=FLAGS.exec_horizon)
+
+    ##################################
+    # DEBUGGING
+    ##################################
+    from octo.data.oxe import make_oxe_dataset_kwargs
+    from octo.data.dataset import make_single_dataset
+    from data.utils.data_utils import NormalizationType
+    dataset_action_horizon = 500
+    dataset = make_single_dataset(
+        dataset_kwargs=dict(
+            name='conq_hose_manipulation:1.2.0',
+            data_dir="/home/peter/tensorflow_datasets",
+            image_obs_keys={"primary": "hand_color_image"},
+            state_obs_keys=["state"],
+            language_key="language_instruction",
+            action_proprio_normalization_type=NormalizationType.NORMAL,
+            absolute_action_mask=[False, False, False, False, False, False, True, True],
+        ),
+        traj_transform_kwargs=dict(
+            window_size=1,
+            future_action_window_size=dataset_action_horizon - 1,
+        ),
+        frame_transform_kwargs=dict(
+            resize_size={"primary": (256, 256)},
+        ),
+        train=False,  # use the validation dataset
+    )
+    iterator = list(dataset.unbatch().iterator())
+
+    with (LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True)):
+        look_cmd = hand_pose_cmd(clients, 0.5, 0, 0.4, 0, np.deg2rad(75), 0, duration=1)
+        blocking_arm_command(clients, look_cmd)
+        open_gripper(clients)
+
+        state = env.clients.state.get_robot_state()
+        snapshot = state.kinematic_state.transforms_snapshot
+        hand_in_vision0 = get_a_tform_b(snapshot, VISION_FRAME_NAME, HAND_FRAME_NAME)
+        body_in_vision0 = get_a_tform_b(snapshot, VISION_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
+        hand_in_body0 = get_a_tform_b(snapshot, GRAV_ALIGNED_BODY_FRAME_NAME, HAND_FRAME_NAME)
+
+        rr.set_time_sequence('t', 0)
+        viz_common_frames(snapshot)
+        i = 0
+        debug_batch = iterator[i]
+        example_actions = debug_batch['action']
+        hand_in_vision = copy(hand_in_vision0)
+        for t, action_normalized in enumerate(example_actions):
+            action = env.unnormalize(action_normalized, env.action_proprio_metadata["action"])
+            rr.set_time_sequence('t', t)
+            rr.log("d/x", rr.TimeSeriesScalar(action[0]))
+            rr.log("d/z", rr.TimeSeriesScalar(action[2]))
+            rr.log("gripper/open_fraction", rr.TimeSeriesScalar(action[6]))
+            # Compute hand to body by subtracting the body_in_vision0 from the current hand_in_vision
+            hand_in_body = body_in_vision0.inverse() * hand_in_vision
+            new_hand_in_vision = env.get_new_hand_in_vision(action, body_in_vision0, hand_in_body)
+            rr_tform(f'hand_pred', new_hand_in_vision)
+            hand_in_vision = new_hand_in_vision
+        print("done")
+    return
+    ##################################
 
     rng = jax.random.PRNGKey(1)
     goal_instruction = "grasp hose"
