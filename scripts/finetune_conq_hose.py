@@ -31,8 +31,9 @@ flags.DEFINE_string(
 flags.DEFINE_string("data_dir", None, "Path to finetuning dataset, in RLDS format.")
 flags.DEFINE_string("save_dir", None, "Directory for saving finetuning checkpoints.")
 flags.DEFINE_integer("batch_size", 32, "Batch size for finetuning.")
-flags.DEFINE_integer("n_steps", 500_000, "Number of batches to finetune for.")
+flags.DEFINE_integer("n_steps", 200_000, "Number of batches to finetune for.")
 flags.DEFINE_integer("pred_horizon", 50, "Number of batches to finetune for.")
+flags.DEFINE_integer("obs_window_size", 5, "Number of input observations to condition on.")
 
 flags.DEFINE_bool(
     "freeze_transformer",
@@ -59,7 +60,7 @@ def main(_):
             FLAGS.batch_size % jax.device_count() == 0
     ), "Batch size must be divisible by device count."
 
-    dataset_name = "conq_hose_manipulation:1.2.0"
+    dataset_name = "conq_hose_manipulation:1.3.0"
 
     initialize_compilation_cache()
     # prevent tensorflow from using GPU memory since it's only used for data loading
@@ -89,7 +90,7 @@ def main(_):
             absolute_action_mask=[False, False, False, False, False, False, True, True],
         ),
         traj_transform_kwargs=dict(
-            window_size=1,
+            window_size=FLAGS.obs_window_size,
             future_action_window_size=FLAGS.pred_horizon - 1,  # so we get pred_horizon actions for our action chunk
         ),
         frame_transform_kwargs=dict(

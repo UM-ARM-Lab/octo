@@ -52,33 +52,10 @@ flags.DEFINE_integer("im_size", None, "Image size", required=True)
 flags.DEFINE_string("video_save_path", None, "Path to save video")
 flags.DEFINE_integer("num_timesteps", 120, "num timesteps")
 flags.DEFINE_integer("horizon", 1, "Observation history length")
-flags.DEFINE_integer("exec_horizon", 10, "Length of action sequence to execute")
-
-# show image flag
-flags.DEFINE_bool("show_image", False, "Show image")
-
-##############################################################################
-
-STEP_DURATION_MESSAGE = """
-Bridge data was collected with non-blocking control and a step duration of 0.2s.
-However, we relabel the actions to make it look like the data was collected with
-blocking control and we evaluate with blocking control.
-We also use a step duration of 0.4s to reduce the jerkiness of the policy.
-Be sure to change the step duration back to 0.2 if evaluating with non-blocking control.
-"""
-STEP_DURATION = 0.4
-STICKY_GRIPPER_NUM_STEPS = 1
-WORKSPACE_BOUNDS = [[0.1, -0.15, -0.01, -1.57, 0], [0.45, 0.25, 0.25, 1.57, 0]]
-CAMERA_TOPICS = [{"name": "/blue/image_raw"}]
-ENV_PARAMS = {
-    "camera_topics": CAMERA_TOPICS,
-    "override_workspace_boundaries": WORKSPACE_BOUNDS,
-    "move_duration": STEP_DURATION,
-}
+flags.DEFINE_integer("exec_horizon", 3, "Length of action sequence to execute")
 
 
-##############################################################################
-
+STEP_DURATION = 0.02
 
 def my_euler_to_quat(euler):
     q_xyzw = Rot.from_euler("xyz", euler, degrees=False).as_quat().tolist()
@@ -233,67 +210,66 @@ def main(_):
     # DEBUGGING
     ##################################
     from octo.data.oxe import make_oxe_dataset_kwargs
-    from octo.data.dataset import make_single_dataset
-    from data.utils.data_utils import NormalizationType
-    dataset_action_horizon = 500
-    dataset = make_single_dataset(
-        dataset_kwargs=dict(
-            name='conq_hose_manipulation:1.2.0',
-            data_dir="/home/peter/tensorflow_datasets",
-            image_obs_keys={"primary": "hand_color_image"},
-            state_obs_keys=["state"],
-            language_key="language_instruction",
-            action_proprio_normalization_type=NormalizationType.NORMAL,
-            absolute_action_mask=[False, False, False, False, False, False, True, True],
-        ),
-        traj_transform_kwargs=dict(
-            window_size=1,
-            future_action_window_size=dataset_action_horizon - 1,
-        ),
-        frame_transform_kwargs=dict(
-            resize_size={"primary": (256, 256)},
-        ),
-        train=False,  # use the validation dataset
-    )
-    iterator = list(dataset.unbatch().iterator())
-
-    with (LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True)):
-        look_cmd = hand_pose_cmd(clients, 0.5, 0, 0.4, 0, np.deg2rad(75), 0, duration=1)
-        blocking_arm_command(clients, look_cmd)
-        open_gripper(clients)
-
-        state = env.clients.state.get_robot_state()
-        snapshot = state.kinematic_state.transforms_snapshot
-        hand_in_vision0 = get_a_tform_b(snapshot, VISION_FRAME_NAME, HAND_FRAME_NAME)
-        body_in_vision0 = get_a_tform_b(snapshot, VISION_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
-        hand_in_body0 = get_a_tform_b(snapshot, GRAV_ALIGNED_BODY_FRAME_NAME, HAND_FRAME_NAME)
-
-        rr.set_time_sequence('t', 0)
-        viz_common_frames(snapshot)
-        i = 0
-        debug_batch = iterator[i]
-        example_actions = debug_batch['action']
-        hand_in_vision = copy(hand_in_vision0)
-        for t, action_normalized in enumerate(example_actions):
-            action = env.unnormalize(action_normalized, env.action_proprio_metadata["action"])
-            rr.set_time_sequence('t', t)
-            rr.log("d/x", rr.TimeSeriesScalar(action[0]))
-            rr.log("d/z", rr.TimeSeriesScalar(action[2]))
-            rr.log("gripper/open_fraction", rr.TimeSeriesScalar(action[6]))
-            # Compute hand to body by subtracting the body_in_vision0 from the current hand_in_vision
-            hand_in_body = body_in_vision0.inverse() * hand_in_vision
-            new_hand_in_vision = env.get_new_hand_in_vision(action, body_in_vision0, hand_in_body)
-            rr_tform(f'hand_pred', new_hand_in_vision)
-            hand_in_vision = new_hand_in_vision
-        print("done")
-    return
+    # from octo.data.dataset import make_single_dataset
+    # from data.utils.data_utils import NormalizationType
+    # dataset_action_horizon = 300
+    # dataset = make_single_dataset(
+    #     dataset_kwargs=dict(
+    #         name='conq_hose_manipulation:1.2.0',
+    #         data_dir="/home/peter/tensorflow_datasets",
+    #         image_obs_keys={"primary": "hand_color_image"},
+    #         state_obs_keys=["state"],
+    #         language_key="language_instruction",
+    #         action_proprio_normalization_type=NormalizationType.NORMAL,
+    #         absolute_action_mask=[False, False, False, False, False, False, True, True],
+    #     ),
+    #     traj_transform_kwargs=dict(
+    #         window_size=1,
+    #         future_action_window_size=dataset_action_horizon - 1,
+    #     ),
+    #     frame_transform_kwargs=dict(
+    #         resize_size={"primary": (256, 256)},
+    #     ),
+    #     train=False,  # use the validation dataset
+    # )
+    # iterator = list(dataset.unbatch().iterator())
+    #
+    # with (LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True)):
+    #     look_cmd = hand_pose_cmd(clients, 0.55, 0, 0.4, 0, np.deg2rad(75), 0, duration=1)
+    #     blocking_arm_command(clients, look_cmd)
+    #     open_gripper(clients)
+    #
+    #     state = env.clients.state.get_robot_state()
+    #     snapshot = state.kinematic_state.transforms_snapshot
+    #     hand_in_vision0 = get_a_tform_b(snapshot, VISION_FRAME_NAME, HAND_FRAME_NAME)
+    #     body_in_vision0 = get_a_tform_b(snapshot, VISION_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
+    #
+    #     rr.set_time_sequence('t', 0)
+    #     viz_common_frames(snapshot)
+    #     i = 0
+    #     debug_batch = iterator[i]
+    #     example_actions = debug_batch['action']
+    #     hand_in_vision = copy(hand_in_vision0)
+    #     for t, action_normalized in enumerate(example_actions):
+    #         action = env.unnormalize(action_normalized, env.action_proprio_metadata["action"])
+    #         rr.set_time_sequence('t', t)
+    #         rr.log("d/x", rr.TimeSeriesScalar(action[0]))
+    #         rr.log("d/z", rr.TimeSeriesScalar(action[2]))
+    #         rr.log("gripper/open_fraction", rr.TimeSeriesScalar(action[6]))
+    #         # Compute hand to body by subtracting the body_in_vision0 from the current hand_in_vision
+    #         hand_in_body = body_in_vision0.inverse() * hand_in_vision
+    #         new_hand_in_vision = env.get_new_hand_in_vision(action, body_in_vision0, hand_in_body)
+    #         rr_tform(f'hand_pred', new_hand_in_vision)
+    #         hand_in_vision = new_hand_in_vision
+    #     print("done")
+    # return
     ##################################
 
     rng = jax.random.PRNGKey(1)
     goal_instruction = "grasp hose"
 
     with (LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True)):
-        look_cmd = hand_pose_cmd(clients, 0.5, 0, 0.4, 0, np.deg2rad(75), 0, duration=1)
+        look_cmd = hand_pose_cmd(clients, 0.55, 0, 0.4, 0, np.deg2rad(75), 0, duration=1)
         blocking_arm_command(clients, look_cmd)
         open_gripper(clients)
 
@@ -302,9 +278,6 @@ def main(_):
 
             # reset env
             obs, _ = env.reset()
-            time.sleep(2.0)
-
-            # input("Press [Enter] to start.")
 
             # do rollout
             last_tstep = time.time()
@@ -317,22 +290,17 @@ def main(_):
                     # save images
                     images.append(obs["image_primary"][-1])
 
-                    if FLAGS.show_image:
-                        bgr_img = cv2.cvtColor(obs["image_primary"][-1], cv2.COLOR_RGB2BGR)
-                        cv2.imshow("img_view", bgr_img)
-                        cv2.waitKey(20)
+                    rr.log("image_primary", rr.Image(obs["image_primary"][-1]))
 
                     # get action
                     forward_pass_time = time.time()
 
                     actions = model.sample_actions(jax.tree_map(lambda x: x[None], obs), task, rng=rng)
                     actions = actions[0]
-                    print("forward pass time: ", time.time() - forward_pass_time)
+                    print(f"forward pass time: {time.time() - forward_pass_time:.3f}")
 
                     # perform environment step
-                    start_time = time.time()
                     obs, _, _, truncated, _ = env.step(actions)
-                    print("step time: ", time.time() - start_time)
 
                     t += 1
 
