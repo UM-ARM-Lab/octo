@@ -71,6 +71,11 @@ def main(_):
     wandb.config.update(flags.FLAGS)
     wandb.config["dataset_name"] = dataset_name
 
+    if FLAGS.data_dir is None:
+        data_dir = Path("~/tensorflow_datasets").expand_user()
+    else
+        data_dir = FLAGS.data_dir
+
     # make finetuning dataset
     # apply Gaussian normalization, load chunks of `pred_horizon` actions since we'll train with action chunking
     # delete goal images in the data loader since we will train a language-conditioned-only policy
@@ -78,7 +83,7 @@ def main(_):
     dataset = make_single_dataset(
         dataset_kwargs=dict(
             name=dataset_name,
-            data_dir=FLAGS.data_dir,
+            data_dir=data_dir,
             image_obs_keys={"primary": "hand_color_image"},
             state_obs_keys=["state"],
             language_key="language_instruction",
