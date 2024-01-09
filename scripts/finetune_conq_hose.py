@@ -1,13 +1,13 @@
-import os
+#!/usr/bin/env python3
 from pathlib import Path
 
-from absl import app, flags, logging
 import flax
 import jax
 import optax
 import tensorflow as tf
 import tqdm
 import wandb
+from absl import app, flags, logging
 
 from octo.data.dataset import make_single_dataset
 from octo.data.utils.data_utils import NormalizationType
@@ -26,7 +26,7 @@ from octo.utils.train_utils import (
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string(
-    "pretrained_path", None, "Path to pre-trained Octo checkpoint directory."
+    "resume_from", None, "Path to an existing fine-tuning checkpoint directory."
 )
 flags.DEFINE_string("data_dir", None, "Path to finetuning dataset, in RLDS format.")
 flags.DEFINE_string("save_dir", None, "Directory for saving finetuning checkpoints.")
@@ -71,10 +71,6 @@ def main(_):
     wandb.config.update(flags.FLAGS)
     wandb.config["dataset_name"] = dataset_name
 
-    # load pre-trained model
-    logging.info("Loading pre-trained model...")
-    pretrained_model = OctoModel.load_pretrained(FLAGS.pretrained_path)
-
     # make finetuning dataset
     # apply Gaussian normalization, load chunks of `pred_horizon` actions since we'll train with action chunking
     # delete goal images in the data loader since we will train a language-conditioned-only policy
@@ -106,6 +102,14 @@ def main(_):
         .iterator()
     )
 
+    # load pre-trained model
+    if FLAGS.resume_from is None:
+        logging.info("Loading base model from HuggingFace...")
+        base_model = "hf://rail-berkeley/octo-small"
+        pretrained_model = OctoModel.load_pretrained(base_model)
+    else:
+        pretrained_model = OctoModel.load_pretrained(FLAGS.resume_from)
+
     # run text tokenizer over batch (this needs to happen before training / sharding) + delete unused keys
     text_processor = pretrained_model.text_processor
 
@@ -115,6 +119,17 @@ def main(_):
         return batch
 
     train_data_iter = map(process_batch, train_data_iter)
+
+    if FLAGS.resume_from is None:
+        model = modify_model(pretrained_model, dataset, train_data_iter)
+        del pretrained_model
+    else:
+        model = pretrained_model
+
+    fine_tune(model, train_data_iter)
+
+
+def modify_model(pretrained_model, dataset, train_data_iter):
     example_batch = next(train_data_iter)
 
     # load pre-training config and modify --> remove wrist cam, add proprio input, change action head
@@ -137,14 +152,13 @@ def main(_):
         action_dim=example_batch["action"].shape[-1],
         readout_key="readout_action",
     )
-
     # initialize weights for modified Octo model, then merge in all applicable pre-trained weights
     # new position encodings for proprio inputs & weights for new action head will remain "from scratch"
     logging.info("Updating model for new observation & action space...")
     model = OctoModel.from_config(
         config,
         example_batch,
-        text_processor,
+        pretrained_model.text_processor,
         verbose=True,
         dataset_statistics=dataset.dataset_statistics,
     )
@@ -152,8 +166,10 @@ def main(_):
     # can perform any additional parameter surgery here...
     # ...
     model = model.replace(params=merged_params)
-    del pretrained_model
+    return model
 
+
+def fine_tune(model, train_data_iter):
     # create optimizer & train_state, optionally freeze keys for pre-trained transformer
     # train_state bundles parameters & optimizers
     learning_rate = optax.join_schedules(

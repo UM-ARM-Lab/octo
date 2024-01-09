@@ -50,7 +50,7 @@ flags.DEFINE_bool("blocking", False, "Use the blocking controller")
 
 flags.DEFINE_integer("im_size", None, "Image size", required=True)
 flags.DEFINE_string("video_save_path", None, "Path to save video")
-flags.DEFINE_integer("num_timesteps", 120, "num timesteps")
+flags.DEFINE_integer("num_timesteps", 80, "num timesteps")
 flags.DEFINE_integer("horizon", 1, "Observation history length")
 flags.DEFINE_integer("exec_horizon", 3, "Length of action sequence to execute")
 
@@ -188,93 +188,35 @@ def main(_):
     manipulation_api_client = robot.ensure_client(ManipulationApiClient.default_service_name)
     image_client = robot.ensure_client(ImageClient.default_service_name)
 
-    lease_client.take()
-
-    command_client = setup_and_stand(robot)
-
-    clients = Clients(lease=lease_client, state=robot_state_client, manipulation=manipulation_api_client,
-                      image=image_client, raycast=None, command=command_client, robot=robot, recorder=None)
-
     # load models
     model = OctoModel.load_pretrained(
         FLAGS.checkpoint_weights_path,
         FLAGS.checkpoint_step,
     )
 
+    lease_client.take()
+    command_client = setup_and_stand(robot)
+    clients = Clients(lease=lease_client, state=robot_state_client, manipulation=manipulation_api_client,
+                      image=image_client, raycast=None, command=command_client, robot=robot, recorder=None)
+
     # wrap the robot environment
     env = ConqGymEnv(clients, FLAGS.im_size, FLAGS.blocking)
     env = add_octo_env_wrappers(env, model.config, dict(model.dataset_statistics), normalization_type="normal",
                                 resize_size=(FLAGS.im_size, FLAGS.im_size), exec_horizon=FLAGS.exec_horizon)
 
-    ##################################
-    # DEBUGGING
-    ##################################
-    from octo.data.oxe import make_oxe_dataset_kwargs
-    # from octo.data.dataset import make_single_dataset
-    # from data.utils.data_utils import NormalizationType
-    # dataset_action_horizon = 300
-    # dataset = make_single_dataset(
-    #     dataset_kwargs=dict(
-    #         name='conq_hose_manipulation:1.2.0',
-    #         data_dir="/home/peter/tensorflow_datasets",
-    #         image_obs_keys={"primary": "hand_color_image"},
-    #         state_obs_keys=["state"],
-    #         language_key="language_instruction",
-    #         action_proprio_normalization_type=NormalizationType.NORMAL,
-    #         absolute_action_mask=[False, False, False, False, False, False, True, True],
-    #     ),
-    #     traj_transform_kwargs=dict(
-    #         window_size=1,
-    #         future_action_window_size=dataset_action_horizon - 1,
-    #     ),
-    #     frame_transform_kwargs=dict(
-    #         resize_size={"primary": (256, 256)},
-    #     ),
-    #     train=False,  # use the validation dataset
-    # )
-    # iterator = list(dataset.unbatch().iterator())
-    #
-    # with (LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True)):
-    #     look_cmd = hand_pose_cmd(clients, 0.55, 0, 0.4, 0, np.deg2rad(75), 0, duration=1)
-    #     blocking_arm_command(clients, look_cmd)
-    #     open_gripper(clients)
-    #
-    #     state = env.clients.state.get_robot_state()
-    #     snapshot = state.kinematic_state.transforms_snapshot
-    #     hand_in_vision0 = get_a_tform_b(snapshot, VISION_FRAME_NAME, HAND_FRAME_NAME)
-    #     body_in_vision0 = get_a_tform_b(snapshot, VISION_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
-    #
-    #     rr.set_time_sequence('t', 0)
-    #     viz_common_frames(snapshot)
-    #     i = 0
-    #     debug_batch = iterator[i]
-    #     example_actions = debug_batch['action']
-    #     hand_in_vision = copy(hand_in_vision0)
-    #     for t, action_normalized in enumerate(example_actions):
-    #         action = env.unnormalize(action_normalized, env.action_proprio_metadata["action"])
-    #         rr.set_time_sequence('t', t)
-    #         rr.log("d/x", rr.TimeSeriesScalar(action[0]))
-    #         rr.log("d/z", rr.TimeSeriesScalar(action[2]))
-    #         rr.log("gripper/open_fraction", rr.TimeSeriesScalar(action[6]))
-    #         # Compute hand to body by subtracting the body_in_vision0 from the current hand_in_vision
-    #         hand_in_body = body_in_vision0.inverse() * hand_in_vision
-    #         new_hand_in_vision = env.get_new_hand_in_vision(action, body_in_vision0, hand_in_body)
-    #         rr_tform(f'hand_pred', new_hand_in_vision)
-    #         hand_in_vision = new_hand_in_vision
-    #     print("done")
-    # return
-    ##################################
-
     rng = jax.random.PRNGKey(1)
     goal_instruction = "grasp hose"
 
     with (LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True)):
-        look_cmd = hand_pose_cmd(clients, 0.55, 0, 0.4, 0, np.deg2rad(75), 0, duration=1)
-        blocking_arm_command(clients, look_cmd)
-        open_gripper(clients)
 
         while True:
             task = model.create_tasks(texts=[goal_instruction])
+
+            look_cmd = hand_pose_cmd(clients, 0.70, 0, 0.2, 0, np.deg2rad(75), 0, duration=1)
+            blocking_arm_command(clients, look_cmd)
+            look_cmd = hand_pose_cmd(clients, 0.70, 0, -0.1, 0, np.deg2rad(75), 0, duration=1)
+            blocking_arm_command(clients, look_cmd)
+            open_gripper(clients)
 
             # reset env
             obs, _ = env.reset()
