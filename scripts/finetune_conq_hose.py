@@ -72,8 +72,8 @@ def main(_):
     wandb.config["dataset_name"] = dataset_name
 
     if FLAGS.data_dir is None:
-        data_dir = Path("~/tensorflow_datasets").expand_user()
-    else
+        data_dir = Path("~/tensorflow_datasets").expanduser()
+    else:
         data_dir = FLAGS.data_dir
 
     # make finetuning dataset
@@ -218,7 +218,7 @@ def fine_tune(model, train_data_iter):
         return new_state, info
 
     # run finetuning loop
-    checkpoint_path = Path(FLAGS.save_dir) / wandb.run.id
+    checkpoint_path = (Path(FLAGS.save_dir) / wandb.run.id).absolute()
     checkpoint_path.mkdir(parents=True, exist_ok=True)
     logging.info("Starting finetuning...")
     for i in tqdm.tqdm(range(FLAGS.n_steps), total=FLAGS.n_steps, dynamic_ncols=True):
