@@ -42,19 +42,6 @@ flags.DEFINE_bool(
 )
 
 
-def get_cpu_mem():
-    import psutil
-    return psutil.virtual_memory().available * 100 / psutil.virtual_memory().total
-
-
-def get_gpu_mem():
-    import pynvml
-    pynvml.nvmlInit()
-    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-    info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-    return info.free * 100 / info.total
-
-
 def main(_):
     assert (FLAGS.batch_size % jax.device_count() == 0), "Batch size must be divisible by device count."
 
@@ -67,9 +54,17 @@ def main(_):
     tf.config.set_visible_devices([], "GPU")
 
     # setup wandb for logging
-    wandb.init(name="finetune_conq_hose", project="octo")
+    wandb.init(project="octo")
     wandb.config.update(flags.FLAGS)
     wandb.config["dataset_name"] = dataset_name
+
+    # load pre-trained model
+    if FLAGS.resume_from is None:
+        logging.info("Loading base model from HuggingFace...")
+        base_model = "hf://rail-berkeley/octo-base"
+        pretrained_model = OctoModel.load_pretrained(base_model)
+    else:
+        pretrained_model = OctoModel.load_pretrained(FLAGS.resume_from)
 
     if FLAGS.data_dir is None:
         data_dir = Path("~/tensorflow_datasets").expanduser()
@@ -84,7 +79,7 @@ def main(_):
         'name': dataset_name,
         'data_dir': data_dir,
         # QUESTION: how do these keys relate to the dataset or the model head names?
-        'image_obs_keys': {"wrist": "hand_color_image"},
+        'image_obs_keys': {"wrist": "hand_color_image", "primary": "frontright_fisheye_image"},
         'state_obs_keys': ["state"] if use_proprio else None,  # I think this key needs to match the dataset
         'language_key': "language_instruction",
         'action_proprio_normalization_type': NormalizationType.NORMAL,
@@ -112,14 +107,6 @@ def main(_):
         .iterator()
     )
 
-    # load pre-trained model
-    if FLAGS.resume_from is None:
-        logging.info("Loading base model from HuggingFace...")
-        base_model = "hf://rail-berkeley/octo-small"
-        pretrained_model = OctoModel.load_pretrained(base_model)
-    else:
-        pretrained_model = OctoModel.load_pretrained(FLAGS.resume_from)
-
     # run text tokenizer over batch (this needs to happen before training / sharding) + delete unused keys
     text_processor = pretrained_model.text_processor
 
@@ -144,10 +131,9 @@ def main(_):
 def modify_model(pretrained_model, dataset, train_data_iter, use_proprio):
     example_batch = next(train_data_iter)
 
-    # load pre-training config and modify. For example, remove wrist cam, add proprio input, change action head, ...
+    # start from pre-training config and modify
     config = pretrained_model.config
-    del config["model"]["observation_tokenizers"]["wrist"]
-    ###
+    # del config["model"]["observation_tokenizers"]["wrist"]
     if use_proprio:
         config["model"]["observation_tokenizers"]["proprio"] = ModuleSpec.create(
             LowdimObsTokenizer,
