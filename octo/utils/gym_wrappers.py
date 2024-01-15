@@ -76,7 +76,11 @@ def add_octo_env_wrappers(
     logging.info(
         "Unnormalizing proprio and actions w/ statistics: ", dataset_statistics
     )
-    env = UnnormalizeActionProprio(env, dataset_statistics, normalization_type)
+    use_proprio = 'proprio' in config['model']['observation_tokenizers']
+    if use_proprio:
+        env = UnnormalizeActionProprio(env, dataset_statistics, normalization_type)
+    else:
+        env = UnnormalizeAction(env, dataset_statistics, normalization_type)
     exec_horizon = kwargs.get(
         "exec_horizon", config["model"]["heads"]["action"]["kwargs"]["pred_horizon"]
     )
@@ -322,4 +326,77 @@ class UnnormalizeActionProprio(gym.ActionWrapper, gym.ObservationWrapper):
         obs["proprio"] = self.normalize(
             obs["proprio"], self.action_proprio_metadata["proprio"]
         )
+        return obs
+
+
+
+class UnnormalizeAction(gym.ActionWrapper, gym.ObservationWrapper):
+    """
+    Un-normalizes the action, but not proprio.
+    """
+
+    def __init__(
+            self,
+            env: gym.Env,
+            action_proprio_metadata: dict,
+            normalization_type: str,
+    ):
+        self.action_proprio_metadata = jax.tree_map(
+            lambda x: np.array(x),
+            action_proprio_metadata,
+            is_leaf=lambda x: isinstance(x, list),
+        )
+        self.normalization_type = normalization_type
+        super().__init__(env)
+
+    def unnormalize(self, data, metadata):
+        mask = metadata.get("mask", np.ones_like(metadata["mean"], dtype=bool))
+        if self.normalization_type == "normal":
+            return np.where(
+                mask,
+                (data * metadata["std"]) + metadata["mean"],
+                data,
+                )
+        elif self.normalization_type == "bounds":
+            return np.where(
+                mask,
+                ((data + 1) / 2 * (metadata["max"] - metadata["min"] + 1e-8))
+                + metadata["min"],
+                data,
+                )
+        else:
+            raise ValueError(
+                f"Unknown action normalization type: {self.normalization_type}"
+            )
+
+    def normalize(self, data, metadata):
+        mask = metadata.get("mask", np.ones_like(metadata["mean"], dtype=bool))
+        if self.normalization_type == "normal":
+            return np.where(
+                mask,
+                (data - metadata["mean"]) / (metadata["std"] + 1e-8),
+                data,
+                )
+        elif self.normalization_type == "bounds":
+            return np.where(
+                mask,
+                np.clip(
+                    2
+                    * (data - metadata["min"])
+                    / (metadata["max"] - metadata["min"] + 1e-8)
+                    - 1,
+                    -1,
+                    1,
+                    ),
+                data,
+            )
+        else:
+            raise ValueError(
+                f"Unknown action normalization type: {self.normalization_type}"
+            )
+
+    def action(self, action):
+        return self.unnormalize(action, self.action_proprio_metadata["action"])
+
+    def observation(self, obs):
         return obs

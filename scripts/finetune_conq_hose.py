@@ -56,11 +56,11 @@ def get_gpu_mem():
 
 
 def main(_):
-    assert (
-            FLAGS.batch_size % jax.device_count() == 0
-    ), "Batch size must be divisible by device count."
+    assert (FLAGS.batch_size % jax.device_count() == 0), "Batch size must be divisible by device count."
 
-    dataset_name = "conq_hose_manipulation:1.3.0"
+    use_proprio = False
+
+    dataset_name = "conq_hose_manipulation:1.5.0"
 
     initialize_compilation_cache()
     # prevent tensorflow from using GPU memory since it's only used for data loading
@@ -80,22 +80,27 @@ def main(_):
     # apply Gaussian normalization, load chunks of `pred_horizon` actions since we'll train with action chunking
     # delete goal images in the data loader since we will train a language-conditioned-only policy
     logging.info("Loading finetuning dataset...")
+    dataset_kwargs = {
+        'name': dataset_name,
+        'data_dir': data_dir,
+        # QUESTION: how do these keys relate to the dataset or the model head names?
+        'image_obs_keys': {"wrist": "hand_color_image"},
+        'state_obs_keys': ["state"] if use_proprio else None,  # I think this key needs to match the dataset
+        'language_key': "language_instruction",
+        'action_proprio_normalization_type': NormalizationType.NORMAL,
+        'absolute_action_mask': [False, False, False, False, False, False, True, True],
+    }
     dataset = make_single_dataset(
-        dataset_kwargs=dict(
-            name=dataset_name,
-            data_dir=data_dir,
-            image_obs_keys={"primary": "hand_color_image"},
-            state_obs_keys=["state"],
-            language_key="language_instruction",
-            action_proprio_normalization_type=NormalizationType.NORMAL,
-            absolute_action_mask=[False, False, False, False, False, False, True, True],
-        ),
+        dataset_kwargs=dataset_kwargs,
         traj_transform_kwargs=dict(
             window_size=FLAGS.obs_window_size,
             future_action_window_size=FLAGS.pred_horizon - 1,  # so we get pred_horizon actions for our action chunk
         ),
         frame_transform_kwargs=dict(
-            resize_size={"primary": (256, 256)},
+            resize_size={
+                "primary": (256, 256),
+                "wrist": (256, 256),
+            },
         ),
         train=True,
     )
@@ -126,30 +131,34 @@ def main(_):
     train_data_iter = map(process_batch, train_data_iter)
 
     if FLAGS.resume_from is None:
-        model = modify_model(pretrained_model, dataset, train_data_iter)
+        model = modify_model(pretrained_model, dataset, train_data_iter, use_proprio)
         del pretrained_model
     else:
         model = pretrained_model
 
+    model.config['dataset_kwargs'].update(dataset_kwargs)
+    wandb.config["dataset_kwargs"] = dataset_kwargs
     fine_tune(model, train_data_iter)
 
 
-def modify_model(pretrained_model, dataset, train_data_iter):
+def modify_model(pretrained_model, dataset, train_data_iter, use_proprio):
     example_batch = next(train_data_iter)
 
-    # load pre-training config and modify --> remove wrist cam, add proprio input, change action head
+    # load pre-training config and modify. For example, remove wrist cam, add proprio input, change action head, ...
     config = pretrained_model.config
     del config["model"]["observation_tokenizers"]["wrist"]
     ###
-    config["model"]["observation_tokenizers"]["proprio"] = ModuleSpec.create(
-        LowdimObsTokenizer,
-        n_bins=256,
-        bin_type="normal",
-        # FIXME: check what low and high should be!
-        low=-2.0,
-        high=2.0,
-        obs_keys=["proprio"],
-    )
+    if use_proprio:
+        config["model"]["observation_tokenizers"]["proprio"] = ModuleSpec.create(
+            LowdimObsTokenizer,
+            n_bins=256,
+            bin_type="normal",
+            # FIXME: check what low and high should be!
+            low=-2.0,
+            high=2.0,
+            # FIXME: why is this "proprio" and not "state"? is it to match the named used in the dataset?
+            obs_keys=["proprio"],
+        )
     # Fully override the old action head with a new one (for smaller changes, you can use update_module_config)
     config["model"]["heads"]["action"] = ModuleSpec.create(
         L1ActionHead,
@@ -220,7 +229,8 @@ def fine_tune(model, train_data_iter):
     # run finetuning loop
     checkpoint_path = (Path(FLAGS.save_dir) / wandb.run.id).absolute()
     checkpoint_path.mkdir(parents=True, exist_ok=True)
-    logging.info("Starting finetuning...")
+    logging.info(f"Starting finetuning for {FLAGS.n_steps} steps...")
+    i = 0
     for i in tqdm.tqdm(range(FLAGS.n_steps), total=FLAGS.n_steps, dynamic_ncols=True):
         batch = next(train_data_iter)
         train_state, update_info = train_step(train_state, batch)
@@ -231,9 +241,11 @@ def fine_tune(model, train_data_iter):
                 step=i,
             )
             # TODO: log model artifacts to wandb
-        if i > 0 and i % 1000 == 0:
+        if i in [10, 25_000, 50_000]:
             # save checkpoint
             train_state.model.save_pretrained(step=i, checkpoint_path=checkpoint_path)
+    # make sure to save final checkpoint
+    train_state.model.save_pretrained(step=i, checkpoint_path=checkpoint_path)
 
 
 if __name__ == "__main__":
