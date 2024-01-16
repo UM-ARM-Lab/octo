@@ -64,9 +64,11 @@ class ConqGymEnv(gym.Env):
     def __init__(self, clients: Clients, im_size, model_dataset_kwargs: Dict):
         self.im_size = im_size
         self.clients = clients
-        self.model_kwargs = model_dataset_kwargs
-        self.image_obs_keys = self.model_kwargs['image_obs_keys']
-        self.use_proprio = self.model_kwargs['state_obs_keys'] is not None
+        self.dataset_kwargs = model_dataset_kwargs
+        self.image_obs_keys = self.dataset_kwargs['image_obs_keys']
+        # FIXME: why do I have to add this? The model.observation_tokenizers.obs_stack_keys don't match the keys
+        self.image_obs_keys = {"image_" + k: v for k, v in self.image_obs_keys.items()}
+        self.use_proprio = self.dataset_kwargs['state_obs_keys'] is not None
 
         obs_space_dict = {}
         self.img_srcs = []
@@ -100,7 +102,7 @@ class ConqGymEnv(gym.Env):
         ress = self.clients.image.get_image(reqs)
         imgs = [image_to_opencv(res) for res in ress]
         t2 = time.time()
-        print(f"getting imgs {t2 - t1:.3f}")
+        # print(f"getting imgs {t2 - t1:.3f}")
 
         obs = {}
         for image_obs_key, img_np in zip(self.image_obs_keys, imgs):
@@ -126,9 +128,12 @@ class ConqGymEnv(gym.Env):
         trunc = action[-1] > 0.95
 
         # Sleep if we're going too fast
-        sleep_dt = STEP_DURATION - (time.time() - t0)
-        if sleep_dt > 0:
-            time.sleep(sleep_dt)
+        # also nice to visualize the arm moving
+        while (time.time() - t0) < STEP_DURATION:
+            time.sleep(0.01)
+            state = self.clients.state.get_robot_state()
+            snapshot = state.kinematic_state.transforms_snapshot
+            viz_common_frames(snapshot)
 
         # Log control frequency
         t1 = time.time()
@@ -137,6 +142,7 @@ class ConqGymEnv(gym.Env):
         print(f"control freq: {freq:.3f}Hz")
         if len(self.dts) > 10:  # circular buffer
             self.dts.pop(0)
+
         return obs, 0.0, False, trunc, {}
 
     def model_action_to_conq_cmd(self, action):
@@ -184,10 +190,10 @@ class ConqGymEnv(gym.Env):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint_path", type=Path, help="path up to and including the step number")
-    parser.add_argument("--num-timesteps", type=int, default=70)
+    parser.add_argument("--num-timesteps", type=int, default=50)
     parser.add_argument("--im-size", type=int, default=256)
     parser.add_argument("--horizon", type=int, default=1)
-    parser.add_argument("--exec-horizon", type=int, default=3)
+    parser.add_argument("--exec-horizon", type=int, default=1)
 
     args = parser.parse_args()
 
@@ -206,6 +212,7 @@ def main():
     image_client = robot.ensure_client(ImageClient.default_service_name)
 
     # load models
+    print("Loading model...")
     checkpoint_weights_path = str(args.checkpoint_path.absolute().parent)
     checkpoint_step = int(args.checkpoint_path.name)
     model = OctoModel.load_pretrained(checkpoint_weights_path, checkpoint_step)
@@ -218,7 +225,8 @@ def main():
     # wrap the robot environment
     env = ConqGymEnv(clients, args.im_size, model.config['dataset_kwargs'])
     env = add_octo_env_wrappers(env, model.config, dict(model.dataset_statistics), normalization_type="normal",
-                                resize_size=(args.im_size, args.im_size), exec_horizon=args.exec_horizon)
+                                resize_size=(256, 256),  # FIXME: remove this, use the Octo defaults
+                                exec_horizon=args.exec_horizon)
 
     rng = jax.random.PRNGKey(1)
     goal_instruction = "grasp hose"
@@ -245,7 +253,7 @@ def main():
                 if time.time() > last_tstep + STEP_DURATION:
                     last_tstep = time.time()
 
-                    for img_key, img_src in model.config['dataset_kwargs']['image_obs_keys'].items():
+                    for img_key, img_src in env.image_obs_keys.items():
                         if img_src is not None:
                             rr.log(f"{img_key}", rr.Image(obs[img_key][-1]))
 

@@ -231,9 +231,7 @@ class ResizeImageWrapper(gym.ObservationWrapper):
         elif isinstance(self.resize_size, tuple):
             self.keys_to_resize = {k: resize_size for k in spaces if "image_" in k}
         else:
-            self.keys_to_resize = {
-                f"image_{i}": resize_size[i] for i in range(len(resize_size))
-            }
+            self.keys_to_resize = {f"image_{k}": tuple(resize_size[k]) for k in resize_size}
         logging.info(f"Resizing images: {self.keys_to_resize}")
         for k, size in self.keys_to_resize.items():
             spaces[k] = gym.spaces.Box(

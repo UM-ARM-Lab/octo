@@ -94,7 +94,7 @@ def main(_):
         frame_transform_kwargs=dict(
             resize_size={
                 "primary": (256, 256),
-                "wrist": (256, 256),
+                "wrist": (128, 128),
             },
         ),
         train=True,
