@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import time
+from pathlib import Path
 from typing import Optional, Tuple, Dict
 
 import bosdyn.client
@@ -182,8 +183,7 @@ class ConqGymEnv(gym.Env):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("checkpoint_weights_path", type=str)
-    parser.add_argument("checkpoint_step", type=int)
+    parser.add_argument("checkpoint_path", type=Path, help="path up to and including the step number")
     parser.add_argument("--num-timesteps", type=int, default=70)
     parser.add_argument("--im-size", type=int, default=256)
     parser.add_argument("--horizon", type=int, default=1)
@@ -206,7 +206,9 @@ def main():
     image_client = robot.ensure_client(ImageClient.default_service_name)
 
     # load models
-    model = OctoModel.load_pretrained(args.checkpoint_weights_path, args.checkpoint_step)
+    checkpoint_weights_path = str(args.checkpoint_path.absolute().parent)
+    checkpoint_step = int(args.checkpoint_path.name)
+    model = OctoModel.load_pretrained(checkpoint_weights_path, checkpoint_step)
 
     lease_client.take()
     command_client = setup_and_stand(robot)

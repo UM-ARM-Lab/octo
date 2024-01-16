@@ -213,7 +213,7 @@ def fine_tune(model, train_data_iter):
         return new_state, info
 
     # run finetuning loop
-    checkpoint_path = (Path(FLAGS.save_dir) / wandb.run.id).absolute()
+    checkpoint_path = (Path(FLAGS.save_dir) / wandb.run.name).absolute()
     checkpoint_path.mkdir(parents=True, exist_ok=True)
     logging.info(f"Starting finetuning for {FLAGS.n_steps} steps...")
     i = 0
