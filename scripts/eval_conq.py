@@ -33,8 +33,6 @@ np.set_printoptions(suppress=True, precision=4)
 # Derived from the mean frequency in the training dataset.
 # see `check_control_rate` in `preprocesser.py` in `conq_hose_manipulation_dataset_builder`.
 STEP_DURATION = 1 / 7.7
-# DEBUGGING
-STEP_DURATION = 1.0 / 5
 
 
 def my_euler_to_quat(euler):
@@ -127,7 +125,7 @@ class ConqGymEnv(gym.Env):
 
         # FIXME: how to set seconds? does it actually change the speed?
         arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(new_hand_in_vision.to_proto(), VISION_FRAME_NAME,
-                                                                 seconds=STEP_DURATION * 1.1)
+                                                                 seconds=STEP_DURATION * 1.)
         cmd = arm_cmd
         # cmd = add_follow_with_body(arm_cmd)
         # cmd.synchronized_command.arm_command.arm_cartesian_command.max_linear_velocity.value = 1.0
@@ -204,32 +202,6 @@ def main():
     rr.init('eval')
     rr.connect()
 
-    # DEBUGGING
-    from octo.data.dataset import make_single_dataset
-    from octo.data.utils.data_utils import NormalizationType
-    dataset_name = "conq_hose_manipulation:1.7.0"
-    data_dir = Path("~/tensorflow_datasets").expanduser()
-    use_proprio = False
-    dataset_kwargs = {
-        'name': dataset_name,
-        'data_dir': data_dir,
-        # QUESTION: how do these keys relate to the dataset or the model head names?
-        'image_obs_keys': {"wrist": "hand_color_image", "primary": "frontright_fisheye_image"},
-        'state_obs_keys': ["state"] if use_proprio else None,  # I think this key needs to match the dataset
-        'language_key': "language_instruction",
-        'action_proprio_normalization_type': NormalizationType.NORMAL,
-        'absolute_action_mask': [False, False, False, False, False, False, True, True],
-    }
-    dataset = make_single_dataset(
-        dataset_kwargs=dataset_kwargs,
-        traj_transform_kwargs=dict(window_size=2, future_action_window_size=100),
-        frame_transform_kwargs=dict(resize_size={"primary": (256, 256), "wrist": (128, 128), }),
-        train=True,
-    )
-    iterator = dataset.repeat().unbatch().take(n_episodes).iterator()
-    examples = list(iterator)
-    # DEBUGGING
-
     # load models
     print("Loading model...")
     checkpoint_weights_path = str(args.checkpoint_path.absolute().parent)
@@ -251,8 +223,7 @@ def main():
     env = ConqGymEnv(clients, model.config['dataset_kwargs'])
     env = add_octo_env_wrappers(env=env,
                                 config=model.config,
-                                # dataset_statistics=dict(model.dataset_statistics),
-                                dataset_statistics=dataset.dataset_statistics,
+                                dataset_statistics=dict(model.dataset_statistics),
                                 # FIXME: just for replaying examples from dataset!
                                 normalization_type="normal",
                                 exec_horizon=args.exec_horizon)
@@ -285,17 +256,12 @@ def main():
                         rr.log(f"{img_key}", rr.Image(obs[img_key][-1]))
 
                 # get action
-                # actions = model.sample_actions(jax.tree_map(lambda x: x[None], obs), task, rng=rng)
-                # actions = actions[0]
-                example = examples[episode_idx]
-                if example['action'][t, -1] > 0:
-                    print("ran out of actions!!!")
-                    break
-                actions_normalized = example['action'][t]
+                actions = model.sample_actions(jax.tree_map(lambda x: x[None], obs), task, rng=rng)
+                actions = actions[0]
 
                 # perform environment step
                 # this will block to achieve the right control frequency to match training time
-                obs, _, _, truncated, _ = env.step(actions_normalized)
+                obs, _, _, truncated, _ = env.step(actions)
 
                 t += 1
 
