@@ -47,7 +47,7 @@ def main(_):
 
     use_proprio = False
 
-    dataset_name = "conq_hose_manipulation:1.5.0"
+    dataset_name = "conq_hose_manipulation:1.6.0"
 
     initialize_compilation_cache()
     # prevent tensorflow from using GPU memory since it's only used for data loading
