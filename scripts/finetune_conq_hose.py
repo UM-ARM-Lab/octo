@@ -31,9 +31,9 @@ flags.DEFINE_string(
 flags.DEFINE_string("data_dir", None, "Path to finetuning dataset, in RLDS format.")
 flags.DEFINE_string("save_dir", None, "Directory for saving finetuning checkpoints.")
 flags.DEFINE_integer("batch_size", 32, "Batch size for finetuning.")
-flags.DEFINE_integer("n_steps", 200_000, "Number of batches to finetune for.")
-flags.DEFINE_integer("pred_horizon", 50, "Number of batches to finetune for.")
-flags.DEFINE_integer("obs_window_size", 5, "Number of input observations to condition on.")
+flags.DEFINE_integer("n_steps", 50_000, "Number of batches to finetune for.")
+flags.DEFINE_integer("pred_horizon", 4, "Number of batches to finetune for.")
+flags.DEFINE_integer("obs_window_size", 2, "Number of input observations to condition on.")
 
 flags.DEFINE_bool(
     "freeze_transformer",
@@ -47,7 +47,7 @@ def main(_):
 
     use_proprio = False
 
-    dataset_name = "conq_hose_manipulation:1.6.0"
+    dataset_name = "conq_hose_manipulation:1.9.0"
 
     initialize_compilation_cache()
     # prevent tensorflow from using GPU memory since it's only used for data loading

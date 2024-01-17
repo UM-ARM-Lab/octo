@@ -24,15 +24,16 @@ from conq.clients import Clients
 from conq.data_recorder import get_state_vec
 from conq.hand_motion import hand_pose_cmd
 from conq.manipulation import open_gripper, blocking_arm_command
-from conq.utils import setup_and_stand, setup
+from conq.utils import setup
 from octo.model.octo_model import OctoModel
 from octo.utils.gym_wrappers import add_octo_env_wrappers
+from vr.constants import VR_CMD_PERIOD
 
 np.set_printoptions(suppress=True, precision=4)
 
 # Derived from the mean frequency in the training dataset.
-# see `check_control_rate` in `preprocesser.py` in `conq_hose_manipulation_dataset_builder`.
-STEP_DURATION = 1 / 7.7
+# also see the duration used in generate_data_from_vr.py
+STEP_DURATION = 1 / 7.5
 
 
 def my_euler_to_quat(euler):
@@ -119,17 +120,17 @@ class ConqGymEnv(gym.Env):
     def step(self, action: ActType) -> Tuple[ObsType, float, bool, bool, dict]:
         t0 = time.time()
 
+        open_fraction = np.clip(action[6], 0, 1)
+
+        # For delta-pose actions
         # figure out where in vision frame we should move the hand given the action, which is a delta
         new_hand_in_vision = self.get_new_hand_in_vision(action)
-        open_fraction = np.clip(action[6], 0, 1)
 
         # FIXME: how to set seconds? does it actually change the speed?
         arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(new_hand_in_vision.to_proto(), VISION_FRAME_NAME,
-                                                                 seconds=STEP_DURATION * 1.)
+                                                                 seconds=VR_CMD_PERIOD)
         cmd = arm_cmd
         # cmd = add_follow_with_body(arm_cmd)
-        # cmd.synchronized_command.arm_command.arm_cartesian_command.max_linear_velocity.value = 1.0
-        # cmd.synchronized_command.arm_command.arm_cartesian_command.max_angular_velocity.value = 1.0
 
         # Add gripper command
         gripper_cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(open_fraction)
@@ -137,7 +138,7 @@ class ConqGymEnv(gym.Env):
         # Execute!
         self.clients.command.robot_command(cmd_with_gripper)
 
-        # Sleep to acheive the desired control frequency
+        # Sleep to achieve the desired control frequency
         # also nice to visualize the arm moving
         while (time.time() - t0) < STEP_DURATION:
             time.sleep(0.01)
@@ -224,7 +225,6 @@ def main():
     env = add_octo_env_wrappers(env=env,
                                 config=model.config,
                                 dataset_statistics=dict(model.dataset_statistics),
-                                # FIXME: just for replaying examples from dataset!
                                 normalization_type="normal",
                                 exec_horizon=args.exec_horizon)
 
@@ -240,8 +240,6 @@ def main():
 
             # NOTE: should probably match the starting pose of the robot to the starting pose of the dataset
             open_gripper(clients)
-            look_cmd = hand_pose_cmd(clients, 0.6, 0, 0.6, 0, np.deg2rad(0), 0, duration=0.5)
-            blocking_arm_command(clients, look_cmd)
             look_cmd = hand_pose_cmd(clients, 0.8, 0, 0.2, 0, np.deg2rad(0), 0, duration=0.5)
             blocking_arm_command(clients, look_cmd)
 
