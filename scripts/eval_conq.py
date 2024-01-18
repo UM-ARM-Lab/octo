@@ -23,7 +23,7 @@ from conq.cameras_utils import source_to_fmt, image_to_opencv
 from conq.clients import Clients
 from conq.data_recorder import get_state_vec
 from conq.hand_motion import hand_pose_cmd
-from conq.rerun_utils import viz_common_frames
+from conq.rerun_utils import viz_common_frames, rr_tform
 from conq.manipulation import open_gripper, blocking_arm_command
 from conq.utils import setup
 from octo.model.octo_model import OctoModel
@@ -125,9 +125,11 @@ class ConqGymEnv(gym.Env):
         # Sleep to achieve the desired control frequency
         # also nice to visualize the arm moving
         sleep_dt = ARM_POSE_CMD_PERIOD - (time.time() - t0) - 1e-3
-        time.sleep(sleep_dt)
+        if sleep_dt > 0:
+            time.sleep(sleep_dt)
 
         dt = time.time() - t0
+        rr.log('control_hz', rr.TimeSeriesScalar(1 / dt))
         # print(f"step dt {dt:.3f}")
 
         return obs, 0.0, False, trunc, {}
@@ -151,6 +153,7 @@ class ConqGymEnv(gym.Env):
 
         # for viz in rerun
         viz_common_frames(snapshot)
+        rr_tform('target_hand', new_hand_in_vision)
 
         return new_hand_in_vision
 
@@ -160,12 +163,18 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint_path", type=Path, help="path up to and including the step number")
-    parser.add_argument("--num-timesteps", type=int, default=100)
+    parser.add_argument("--num-timesteps", type=int, default=50)
     parser.add_argument("--horizon", type=int, default=1)
     parser.add_argument("--exec-horizon", type=int, default=1)
     n_episodes = 10
 
     args = parser.parse_args()
+
+    # load models
+    print("Loading model...")
+    checkpoint_weights_path = str(args.checkpoint_path.absolute().parent)
+    checkpoint_step = int(args.checkpoint_path.name)
+    model = OctoModel.load_pretrained(checkpoint_weights_path, checkpoint_step)
 
     # setup Conq
     sdk = bosdyn.client.create_standard_sdk('EvalClient')
@@ -176,12 +185,6 @@ def main():
 
     rr.init('eval')
     rr.connect()
-
-    # load models
-    print("Loading model...")
-    checkpoint_weights_path = str(args.checkpoint_path.absolute().parent)
-    checkpoint_step = int(args.checkpoint_path.name)
-    model = OctoModel.load_pretrained(checkpoint_weights_path, checkpoint_step)
 
     lease_client = robot.ensure_client(LeaseClient.default_service_name)
     robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
