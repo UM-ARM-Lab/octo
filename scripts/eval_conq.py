@@ -23,17 +23,14 @@ from conq.cameras_utils import source_to_fmt, image_to_opencv
 from conq.clients import Clients
 from conq.data_recorder import get_state_vec
 from conq.hand_motion import hand_pose_cmd
+from conq.rerun_utils import viz_common_frames
 from conq.manipulation import open_gripper, blocking_arm_command
 from conq.utils import setup
 from octo.model.octo_model import OctoModel
 from octo.utils.gym_wrappers import add_octo_env_wrappers
-from vr.constants import VR_CMD_PERIOD
+from vr.constants import ARM_POSE_CMD_DURATION, ARM_POSE_CMD_PERIOD
 
 np.set_printoptions(suppress=True, precision=4)
-
-# Derived from the mean frequency in the training dataset.
-# also see the duration used in generate_data_from_vr.py
-STEP_DURATION = 1 / 7.5
 
 
 def my_euler_to_quat(euler):
@@ -45,20 +42,6 @@ def my_euler_to_quat(euler):
 def my_quat_to_euler(q):
     euler = Rot.from_quat([q.x, q.y, q.z, q.w]).as_euler("xyz", degrees=False).tolist()
     return euler
-
-
-def viz_common_frames(snapshot):
-    body_in_vision = get_a_tform_b(snapshot, VISION_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
-    hand_in_vision = get_a_tform_b(snapshot, VISION_FRAME_NAME, HAND_FRAME_NAME)
-    rr_tform('body', body_in_vision)
-    rr_tform('hand', hand_in_vision)
-    rr.log(f'frames/vision', rr.Transform3D(translation=[0, 0, 0]))
-
-
-def rr_tform(child_frame: str, tform: SE3Pose):
-    translation = np.array([tform.position.x, tform.position.y, tform.position.z])
-    rot_mat = tform.rotation.to_matrix()
-    rr.log(f"frames/{child_frame}", rr.Transform3D(rr.TranslationAndMat3x3(translation, rot_mat)))
 
 
 class ConqGymEnv(gym.Env):
@@ -87,15 +70,12 @@ class ConqGymEnv(gym.Env):
 
         self.observation_space = gym.spaces.Dict(obs_space_dict)
         self.action_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32)
-        # for tracking the control frequency
-        self.dts = []
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[ObsType, dict]:
         obs = self.get_obs()
         return obs, {}
 
     def get_obs(self):
-
         t1 = time.time()
         reqs = []
         for src, fmt in zip(self.img_srcs, self.img_fmts):
@@ -103,8 +83,6 @@ class ConqGymEnv(gym.Env):
             reqs.append(req)
         ress = self.clients.image.get_image(reqs)
         imgs = [image_to_opencv(res) for res in ress]
-        t2 = time.time()
-        # print(f"getting imgs {t2 - t1:.3f}")
 
         obs = {}
         for image_obs_key, img_np in zip(self.image_obs_keys, imgs):
@@ -115,6 +93,8 @@ class ConqGymEnv(gym.Env):
             prioprio = get_state_vec(state)
             obs["proprio"] = prioprio
 
+        t2 = time.time()
+        # print(f"getting obs {t2 - t1:.3f}")
         return obs
 
     def step(self, action: ActType) -> Tuple[ObsType, float, bool, bool, dict]:
@@ -126,9 +106,9 @@ class ConqGymEnv(gym.Env):
         # figure out where in vision frame we should move the hand given the action, which is a delta
         new_hand_in_vision = self.get_new_hand_in_vision(action)
 
-        # FIXME: how to set seconds? does it actually change the speed?
+        # FIXME: VR_CMD_PERIOD is constant, but different models may have been trained with different values
         arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(new_hand_in_vision.to_proto(), VISION_FRAME_NAME,
-                                                                 seconds=VR_CMD_PERIOD)
+                                                                 seconds=ARM_POSE_CMD_DURATION)
         cmd = arm_cmd
         # cmd = add_follow_with_body(arm_cmd)
 
@@ -138,28 +118,17 @@ class ConqGymEnv(gym.Env):
         # Execute!
         self.clients.command.robot_command(cmd_with_gripper)
 
-        # Sleep to achieve the desired control frequency
-        # also nice to visualize the arm moving
-        while (time.time() - t0) < STEP_DURATION:
-            time.sleep(0.01)
-            state = self.clients.state.get_robot_state()
-            snapshot = state.kinematic_state.transforms_snapshot
-            rr_tform('new_hand', new_hand_in_vision)
-            rr.log("gripper/open_fraction", rr.TimeSeriesScalar(open_fraction))
-            viz_common_frames(snapshot)
-
         # FIXME: how to set trunc? Are we sure it should be the same as "is_terminal" in the action?
         trunc = action[-1] > 0.95
-
-        # Log control frequency
-        t1 = time.time()
-        self.dts.append(t1 - t0)
-        freq = 1 / np.mean(self.dts)
-        # print(f"control freq: {freq:.3f}Hz")
-        if len(self.dts) > 10:  # circular buffer
-            self.dts.pop(0)
-
         obs = self.get_obs()
+
+        # Sleep to achieve the desired control frequency
+        # also nice to visualize the arm moving
+        sleep_dt = ARM_POSE_CMD_PERIOD - (time.time() - t0) - 1e-3
+        time.sleep(sleep_dt)
+
+        dt = time.time() - t0
+        # print(f"step dt {dt:.3f}")
 
         return obs, 0.0, False, trunc, {}
 
@@ -179,6 +148,10 @@ class ConqGymEnv(gym.Env):
         new_hand_in_body = delta_pose_in_body * hand_in_body
         # Now we need to transform the new hand in body frame into the new hand in vision frame
         new_hand_in_vision = body_in_vision * new_hand_in_body
+
+        # for viz in rerun
+        viz_common_frames(snapshot)
+
         return new_hand_in_vision
 
 
@@ -196,7 +169,8 @@ def main():
 
     # setup Conq
     sdk = bosdyn.client.create_standard_sdk('EvalClient')
-    robot = sdk.create_robot("192.168.80.3")
+    # robot = sdk.create_robot("192.168.80.3")
+    robot = sdk.create_robot("10.0.0.3")
     bosdyn.client.util.authenticate(robot)
     robot.time_sync.wait_for_sync()
 
