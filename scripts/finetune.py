@@ -173,7 +173,7 @@ def main(_):
         del FLAGS.config["dataset_kwargs"]["standardize_fn"]
         FLAGS.config["dataset_kwargs"]["standardize_fn"] = standardize_fn
 
-    dataset = make_single_dataset(
+    dataset, _ = make_single_dataset(
         FLAGS.config.dataset_kwargs,
         traj_transform_kwargs=FLAGS.config.traj_transform_kwargs,
         frame_transform_kwargs=FLAGS.config.frame_transform_kwargs,

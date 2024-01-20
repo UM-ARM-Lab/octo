@@ -22,20 +22,20 @@ from octo.data.utils.data_utils import (
 
 
 def apply_trajectory_transforms(
-    dataset: dl.DLataset,
-    *,
-    train: bool,
-    goal_relabeling_strategy: Optional[str] = None,
-    goal_relabeling_kwargs: dict = {},
-    window_size: int = 1,
-    future_action_window_size: int = 0,
-    subsample_length: Optional[int] = None,
-    skip_unlabeled: bool = False,
-    max_action: Optional[float] = None,
-    max_proprio: Optional[float] = None,
-    task_augment_strategy: Optional[str] = None,
-    task_augment_kwargs: dict = {},
-    num_parallel_calls: int = tf.data.AUTOTUNE,
+        dataset: dl.DLataset,
+        *,
+        train: bool,
+        goal_relabeling_strategy: Optional[str] = None,
+        goal_relabeling_kwargs: dict = {},
+        window_size: int = 1,
+        future_action_window_size: int = 0,
+        subsample_length: Optional[int] = None,
+        skip_unlabeled: bool = False,
+        max_action: Optional[float] = None,
+        max_proprio: Optional[float] = None,
+        task_augment_strategy: Optional[str] = None,
+        task_augment_kwargs: dict = {},
+        num_parallel_calls: int = tf.data.AUTOTUNE,
 ) -> dl.DLataset:
     """Applies common transforms that happen at a trajectory level. Such transforms are usually some sort of
     "relabeling" (e.g. filtering, chunking, adding goals, dropping keys). Transforms that happen in this
@@ -133,13 +133,13 @@ def apply_trajectory_transforms(
 
 
 def apply_frame_transforms(
-    dataset: dl.DLataset,
-    *,
-    train: bool,
-    image_augment_kwargs: Union[dict, Mapping[str, dict]] = {},
-    resize_size: Union[Tuple[int, int], Mapping[str, Tuple[int, int]]] = {},
-    depth_resize_size: Union[Tuple[int, int], Mapping[str, Tuple[int, int]]] = {},
-    num_parallel_calls: int = tf.data.AUTOTUNE,
+        dataset: dl.DLataset,
+        *,
+        train: bool,
+        image_augment_kwargs: Union[dict, Mapping[str, dict]] = {},
+        resize_size: Union[Tuple[int, int], Mapping[str, Tuple[int, int]]] = {},
+        depth_resize_size: Union[Tuple[int, int], Mapping[str, Tuple[int, int]]] = {},
+        num_parallel_calls: int = tf.data.AUTOTUNE,
 ) -> dl.DLataset:
     """Applies common transforms that happen at a frame level. These transforms are usually more
     CPU-intensive, (e.g. decoding or resizing images).
@@ -198,22 +198,22 @@ def apply_frame_transforms(
 
 
 def make_dataset_from_rlds(
-    name: str,
-    data_dir: str,
-    *,
-    train: bool,
-    standardize_fn: Optional[Callable[[dict], dict]] = None,
-    shuffle: bool = True,
-    image_obs_keys: Mapping[str, Optional[str]] = {},
-    depth_obs_keys: Mapping[str, Optional[str]] = {},
-    state_obs_keys: Sequence[Optional[str]] = (),
-    language_key: Optional[str] = None,
-    action_proprio_normalization_type: NormalizationType = NormalizationType.NORMAL,
-    dataset_statistics: Optional[Union[dict, str]] = None,
-    absolute_action_mask: Optional[Sequence[bool]] = None,
-    action_normalization_mask: Optional[Sequence[bool]] = None,
-    num_parallel_reads: int = tf.data.AUTOTUNE,
-    num_parallel_calls: int = tf.data.AUTOTUNE,
+        name: str,
+        data_dir: str,
+        *,
+        train: bool,
+        standardize_fn: Optional[Callable[[dict], dict]] = None,
+        shuffle: bool = True,
+        image_obs_keys: Mapping[str, Optional[str]] = {},
+        depth_obs_keys: Mapping[str, Optional[str]] = {},
+        state_obs_keys: Sequence[Optional[str]] = (),
+        language_key: Optional[str] = None,
+        action_proprio_normalization_type: NormalizationType = NormalizationType.NORMAL,
+        dataset_statistics: Optional[Union[dict, str]] = None,
+        absolute_action_mask: Optional[Sequence[bool]] = None,
+        action_normalization_mask: Optional[Sequence[bool]] = None,
+        num_parallel_reads: int = tf.data.AUTOTUNE,
+        num_parallel_calls: int = tf.data.AUTOTUNE,
 ) -> Tuple[dl.DLataset, dict]:
     """This function is responsible for loading a specific RLDS dataset from storage and getting it into a
     standardized format. Yields a dataset of trajectories. Does not include CPU-intensive operations.
@@ -386,8 +386,8 @@ def make_dataset_from_rlds(
     # skip normalization for certain action dimensions
     if action_normalization_mask is not None:
         if (
-            len(action_normalization_mask)
-            != dataset_statistics["action"]["mean"].shape[-1]
+                len(action_normalization_mask)
+                != dataset_statistics["action"]["mean"].shape[-1]
         ):
             raise ValueError(
                 f"Length of skip_normalization_mask ({len(action_normalization_mask)}) "
@@ -415,15 +415,15 @@ def make_dataset_from_rlds(
         num_parallel_calls,
     )
 
-    return dataset, dataset_statistics
+    return dataset, dataset_statistics, builder.info.full_name
 
 
 def make_single_dataset(
-    dataset_kwargs: dict,
-    *,
-    train: bool,
-    traj_transform_kwargs: dict = {},
-    frame_transform_kwargs: dict = {},
+        dataset_kwargs: dict,
+        *,
+        train: bool,
+        traj_transform_kwargs: dict = {},
+        frame_transform_kwargs: dict = {},
 ) -> dl.DLataset:
     """Creates a single dataset from kwargs. Returns a dataset of trajectories.
 
@@ -433,7 +433,7 @@ def make_single_dataset(
         traj_transform_kwargs: kwargs passed to 'apply_trajectory_transforms'.
         frame_transform_kwargs: kwargs passed to 'get_frame_transforms'.
     """
-    dataset, dataset_statistics = make_dataset_from_rlds(
+    dataset, dataset_statistics, full_dataset_name = make_dataset_from_rlds(
         **dataset_kwargs,
         train=train,
     )
@@ -445,21 +445,21 @@ def make_single_dataset(
 
     # save for later
     dataset.dataset_statistics = dataset_statistics
-    return dataset
+    return dataset, full_dataset_name
 
 
 def make_interleaved_dataset(
-    dataset_kwargs_list: Sequence[dict],
-    sample_weights: Optional[Sequence[float]] = None,
-    *,
-    train: bool,
-    shuffle_buffer_size: int,
-    traj_transform_kwargs: dict = {},
-    frame_transform_kwargs: dict = {},
-    batch_size: Optional[int] = None,
-    balance_weights: bool = False,
-    traj_transform_threads: Optional[int] = None,
-    traj_read_threads: Optional[int] = None,
+        dataset_kwargs_list: Sequence[dict],
+        sample_weights: Optional[Sequence[float]] = None,
+        *,
+        train: bool,
+        shuffle_buffer_size: int,
+        traj_transform_kwargs: dict = {},
+        frame_transform_kwargs: dict = {},
+        batch_size: Optional[int] = None,
+        balance_weights: bool = False,
+        traj_transform_threads: Optional[int] = None,
+        traj_read_threads: Optional[int] = None,
 ) -> dl.DLataset:
     """Creates an interleaved dataset from list of dataset kwargs. Returns a dataset of batched frames.
 
@@ -515,12 +515,12 @@ def make_interleaved_dataset(
     # construct datasets
     datasets = []
     for dataset_kwargs, dataset_statistics, threads, reads in zip(
-        dataset_kwargs_list,
-        all_dataset_statistics,
-        threads_per_dataset,
-        reads_per_dataset,
+            dataset_kwargs_list,
+            all_dataset_statistics,
+            threads_per_dataset,
+            reads_per_dataset,
     ):
-        dataset, _ = make_dataset_from_rlds(
+        dataset, _, _ = make_dataset_from_rlds(
             **dataset_kwargs,
             train=train,
             num_parallel_calls=threads,

@@ -65,7 +65,7 @@ def main(_):
     # delete goal images in the data loader since we will train a language-conditioned-only policy
     # TODO: directly load this from raw data to make it less opaque?
     logging.info("Loading finetuning dataset...")
-    dataset = make_single_dataset(
+    dataset, _ = make_single_dataset(
         dataset_kwargs=dict(
             name="aloha_sim_cube_scripted_dataset",
             data_dir=FLAGS.data_dir,

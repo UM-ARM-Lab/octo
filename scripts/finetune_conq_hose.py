@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 from pathlib import Path
 
 import flax
@@ -7,7 +8,6 @@ import optax
 import tensorflow as tf
 import tqdm
 import wandb
-from absl import app, flags, logging
 
 from octo.data.dataset import make_single_dataset
 from octo.data.utils.data_utils import NormalizationType
@@ -23,31 +23,26 @@ from octo.utils.train_utils import (
     TrainState,
 )
 
-FLAGS = flags.FLAGS
 
-flags.DEFINE_string(
-    "resume_from", None, "Path to an existing fine-tuning checkpoint directory."
-)
-flags.DEFINE_string("data_dir", None, "Path to finetuning dataset, in RLDS format.")
-flags.DEFINE_string("save_dir", None, "Directory for saving finetuning checkpoints.")
-flags.DEFINE_integer("batch_size", 32, "Batch size for finetuning.")
-flags.DEFINE_integer("n_steps", 50_000, "Number of batches to finetune for.")
-flags.DEFINE_integer("pred_horizon", 4, "Number of batches to finetune for.")
-flags.DEFINE_integer("obs_window_size", 2, "Number of input observations to condition on.")
+def main():
+    parser = argparse.ArgumentParser()
 
-flags.DEFINE_bool(
-    "freeze_transformer",
-    False,
-    "Whether pre-trained transformer weights should be frozen.",
-)
+    parser.add_argument('dataset_name', type=str, help='Dataset in name:version format')
+    parser.add_argument('--pred-horizon', type=int, default=4)
+    parser.add_argument('--batch-size', type=int, default=16)
+    parser.add_argument('--n-steps', type=int, default=50_001)
+    parser.add_argument('--obs-window-size', type=int, default=2)
+    parser.add_argument('--freeze-transformer', action='store_true',
+                        help='Whether to freeze pre-trained transformer weights.')
+    parser.add_argument('--save-dir', type=Path, help='Path to an existing fine-tuning checkpoint directory.', default=Path("checkpoints"))
+    parser.add_argument('--resume-from', type=Path, help='Path to an existing fine-tuning checkpoint directory.')
+    parser.add_argument('--use-proprio', action='store_true', help='Whether to use proprioception.')
+    parser.add_argument("--data-dir", type=Path, help="Use to override path to tensorflow datasets.",
+                        default=Path("~/tensorflow_datasets").expanduser())
 
+    args = parser.parse_args()
 
-def main(_):
-    assert (FLAGS.batch_size % jax.device_count() == 0), "Batch size must be divisible by device count."
-
-    use_proprio = False
-
-    dataset_name = "conq_hose_manipulation:1.9.0"
+    assert (args.batch_size % jax.device_count() == 0), "Batch size must be divisible by device count."
 
     initialize_compilation_cache()
     # prevent tensorflow from using GPU memory since it's only used for data loading
@@ -55,41 +50,35 @@ def main(_):
 
     # setup wandb for logging
     wandb.init(project="octo")
-    wandb.config.update(flags.FLAGS)
-    wandb.config["dataset_name"] = dataset_name
+    wandb.config.update(args)
 
     # load pre-trained model
-    if FLAGS.resume_from is None:
-        logging.info("Loading base model from HuggingFace...")
+    if args.resume_from is None:
+        print("Loading base model from HuggingFace...")
         base_model = "hf://rail-berkeley/octo-base"
         pretrained_model = OctoModel.load_pretrained(base_model)
     else:
-        pretrained_model = OctoModel.load_pretrained(FLAGS.resume_from)
-
-    if FLAGS.data_dir is None:
-        data_dir = Path("~/tensorflow_datasets").expanduser()
-    else:
-        data_dir = FLAGS.data_dir
+        pretrained_model = OctoModel.load_pretrained(args.resume_from)
 
     # make finetuning dataset
     # apply Gaussian normalization, load chunks of `pred_horizon` actions since we'll train with action chunking
     # delete goal images in the data loader since we will train a language-conditioned-only policy
-    logging.info("Loading finetuning dataset...")
+    print("Loading finetuning dataset...")
     dataset_kwargs = {
-        'name': dataset_name,
-        'data_dir': data_dir,
+        'name': args.dataset_name,
+        'data_dir': str(args.data_dir),
         # QUESTION: how do these keys relate to the dataset or the model head names?
         'image_obs_keys': {"wrist": "hand_color_image", "primary": "frontright_fisheye_image"},
-        'state_obs_keys': ["state"] if use_proprio else None,  # I think this key needs to match the dataset
+        'state_obs_keys': ["state"] if args.use_proprio else None,  # I think this key needs to match the dataset
         'language_key': "language_instruction",
         'action_proprio_normalization_type': NormalizationType.NORMAL,
-        'absolute_action_mask': [False, False, False, False, False, False, True, True],
+        'absolute_action_mask': [True, True, True, True, True, True, True, True, True],
     }
-    dataset = make_single_dataset(
+    dataset, full_dataset_name = make_single_dataset(
         dataset_kwargs=dataset_kwargs,
         traj_transform_kwargs=dict(
-            window_size=FLAGS.obs_window_size,
-            future_action_window_size=FLAGS.pred_horizon - 1,  # so we get pred_horizon actions for our action chunk
+            window_size=args.obs_window_size,
+            future_action_window_size=args.pred_horizon - 1,  # so we get pred_horizon actions for our action chunk
         ),
         frame_transform_kwargs=dict(
             resize_size={
@@ -103,9 +92,12 @@ def main(_):
         dataset.repeat()
         .unbatch()
         .shuffle(1000)
-        .batch(FLAGS.batch_size)
+        .batch(args.batch_size)
         .iterator()
     )
+
+    wandb.config['full_dataset_name'] = full_dataset_name
+    print(f"Dataset loaded: {full_dataset_name}")
 
     # run text tokenizer over batch (this needs to happen before training / sharding) + delete unused keys
     text_processor = pretrained_model.text_processor
@@ -117,24 +109,24 @@ def main(_):
 
     train_data_iter = map(process_batch, train_data_iter)
 
-    if FLAGS.resume_from is None:
-        model = modify_model(pretrained_model, dataset, train_data_iter, use_proprio)
+    if args.resume_from is None:
+        model = modify_model(args, pretrained_model, dataset, train_data_iter)
         del pretrained_model
     else:
         model = pretrained_model
 
     model.config['dataset_kwargs'].update(dataset_kwargs)
     wandb.config["dataset_kwargs"] = dataset_kwargs
-    fine_tune(model, train_data_iter)
+    fine_tune(args, model, train_data_iter)
 
 
-def modify_model(pretrained_model, dataset, train_data_iter, use_proprio):
+def modify_model(args, pretrained_model, dataset, train_data_iter):
     example_batch = next(train_data_iter)
 
     # start from pre-training config and modify
     config = pretrained_model.config
     # del config["model"]["observation_tokenizers"]["wrist"]
-    if use_proprio:
+    if args.use_proprio:
         config["model"]["observation_tokenizers"]["proprio"] = ModuleSpec.create(
             LowdimObsTokenizer,
             n_bins=256,
@@ -148,13 +140,13 @@ def modify_model(pretrained_model, dataset, train_data_iter, use_proprio):
     # Fully override the old action head with a new one (for smaller changes, you can use update_module_config)
     config["model"]["heads"]["action"] = ModuleSpec.create(
         L1ActionHead,
-        pred_horizon=FLAGS.pred_horizon,
+        pred_horizon=args.pred_horizon,
         action_dim=example_batch["action"].shape[-1],
         readout_key="readout_action",
     )
     # initialize weights for modified Octo model, then merge in all applicable pre-trained weights
     # new position encodings for proprio inputs & weights for new action head will remain "from scratch"
-    logging.info("Updating model for new observation & action space...")
+    print("Updating model for new observation & action space...")
     model = OctoModel.from_config(
         config,
         example_batch,
@@ -169,7 +161,7 @@ def modify_model(pretrained_model, dataset, train_data_iter, use_proprio):
     return model
 
 
-def fine_tune(model, train_data_iter):
+def fine_tune(args, model, train_data_iter):
     # create optimizer & train_state, optionally freeze keys for pre-trained transformer
     # train_state bundles parameters & optimizers
     learning_rate = optax.join_schedules(
@@ -177,7 +169,7 @@ def fine_tune(model, train_data_iter):
     )
     tx = optax.adamw(learning_rate)
     frozen_keys = model.config["optimizer"]["frozen_keys"]
-    if FLAGS.freeze_transformer:
+    if args.freeze_transformer:
         frozen_keys.append("BlockTransformer_0")
     tx = freeze_weights(tx, model.params, frozen_keys)
     train_state = TrainState.create(
@@ -213,11 +205,11 @@ def fine_tune(model, train_data_iter):
         return new_state, info
 
     # run finetuning loop
-    checkpoint_path = (Path(FLAGS.save_dir) / wandb.run.name).absolute()
+    checkpoint_path = (args.save_dir / wandb.run.name).absolute()
     checkpoint_path.mkdir(parents=True, exist_ok=True)
-    logging.info(f"Starting finetuning for {FLAGS.n_steps} steps...")
+    print(f"Starting finetuning for {args.n_steps} steps...")
     i = 0
-    for i in tqdm.tqdm(range(FLAGS.n_steps), total=FLAGS.n_steps, dynamic_ncols=True):
+    for i in tqdm.tqdm(range(args.n_steps), total=args.n_steps, dynamic_ncols=True):
         batch = next(train_data_iter)
         train_state, update_info = train_step(train_state, batch)
         if (i + 1) % 100 == 0:
@@ -227,7 +219,7 @@ def fine_tune(model, train_data_iter):
                 step=i,
             )
             # TODO: log model artifacts to wandb
-        if i in [10, 25_000, 50_000]:
+        if i in [1, 25_000, 50_000]:
             # save checkpoint
             train_state.model.save_pretrained(step=i, checkpoint_path=checkpoint_path)
     # make sure to save final checkpoint
@@ -235,4 +227,4 @@ def fine_tune(model, train_data_iter):
 
 
 if __name__ == "__main__":
-    app.run(main)
+    main()

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import pickle
 import time
 from pathlib import Path
 from typing import Optional, Tuple, Dict
@@ -23,8 +24,8 @@ from conq.cameras_utils import source_to_fmt, image_to_opencv
 from conq.clients import Clients
 from conq.data_recorder import get_state_vec
 from conq.hand_motion import hand_pose_cmd
+from conq.manipulation import open_gripper, blocking_arm_command, add_follow_with_body
 from conq.rerun_utils import viz_common_frames, rr_tform
-from conq.manipulation import open_gripper, blocking_arm_command
 from conq.utils import setup
 from octo.model.octo_model import OctoModel
 from octo.utils.gym_wrappers import add_octo_env_wrappers
@@ -37,11 +38,6 @@ def my_euler_to_quat(euler):
     q_xyzw = Rot.from_euler("xyz", euler, degrees=False).as_quat().tolist()
     q_wxyz = [q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]]
     return q_wxyz
-
-
-def my_quat_to_euler(q):
-    euler = Rot.from_quat([q.x, q.y, q.z, q.w]).as_euler("xyz", degrees=False).tolist()
-    return euler
 
 
 class ConqGymEnv(gym.Env):
@@ -69,7 +65,8 @@ class ConqGymEnv(gym.Env):
             obs_space_dict["proprio"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(66,), dtype=np.float32)
 
         self.observation_space = gym.spaces.Dict(obs_space_dict)
-        self.action_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32)
+        # FIXME: does this even matter? are high/low/shape used anywhere?
+        self.action_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32)
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[ObsType, dict]:
         obs = self.get_obs()
@@ -100,16 +97,18 @@ class ConqGymEnv(gym.Env):
     def step(self, action: ActType) -> Tuple[ObsType, float, bool, bool, dict]:
         t0 = time.time()
 
-        open_fraction = np.clip(action[6], 0, 1)
+        open_fraction = np.clip(action[7], 0., 1.)
 
-        # For delta-pose actions
-        # figure out where in vision frame we should move the hand given the action, which is a delta
-        new_hand_in_vision = self.get_new_hand_in_vision(action)
+        # target_hand_in_body = SE3Pose(x=action[0], y=action[1], z=action[2],
+        #                               rot=Quat(action[3], action[4], action[5], action[6]))
+        target_hand_in_vision = self.get_new_hand_in_vision(action)
 
         # FIXME: VR_CMD_PERIOD is constant, but different models may have been trained with different values
-        arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(new_hand_in_vision.to_proto(), VISION_FRAME_NAME,
+        arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(target_hand_in_vision.to_proto(),
+                                                                 VISION_FRAME_NAME,
                                                                  seconds=ARM_POSE_CMD_DURATION)
         cmd = arm_cmd
+        # FIXME: does absolute hand pose in body frame commands even work if you turn on add_follow_with_body?
         # cmd = add_follow_with_body(arm_cmd)
 
         # Add gripper command
@@ -145,47 +144,33 @@ class ConqGymEnv(gym.Env):
         # where the delta position and orientation is in the current body frame
         # First we're going to take the deltas in current body frame,
         # and apply it to the current hand in body frame to get the new hand in body frame
-        delta_pose_in_body = SE3Pose(x=action[0], y=action[1], z=action[2],
+        delta_hand_in_hand = SE3Pose(x=action[0], y=action[1], z=action[2],
                                      rot=Quat(*my_euler_to_quat([action[3], action[4], action[5]])))
-        new_hand_in_body = delta_pose_in_body * hand_in_body
+        target_hand_in_body = hand_in_body * delta_hand_in_hand
         # Now we need to transform the new hand in body frame into the new hand in vision frame
-        new_hand_in_vision = body_in_vision * new_hand_in_body
+        target_hand_in_vision = body_in_vision * target_hand_in_body
 
         # for viz in rerun
         viz_common_frames(snapshot)
-        rr_tform('target_hand', new_hand_in_vision)
+        rr_tform('target_hand', target_hand_in_vision)
 
-        return new_hand_in_vision
+        return target_hand_in_vision
 
 
-def main():
-    np.set_printoptions(suppress=True, linewidth=220)
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("checkpoint_path", type=Path, help="path up to and including the step number")
-    parser.add_argument("--num-timesteps", type=int, default=50)
-    parser.add_argument("--horizon", type=int, default=1)
-    parser.add_argument("--exec-horizon", type=int, default=1)
-    n_episodes = 10
-
-    args = parser.parse_args()
-
+def setup_robot_and_model(args, **wrapper_kwargs):
     # load models
     print("Loading model...")
     checkpoint_weights_path = str(args.checkpoint_path.absolute().parent)
     checkpoint_step = int(args.checkpoint_path.name)
     model = OctoModel.load_pretrained(checkpoint_weights_path, checkpoint_step)
-
     # setup Conq
     sdk = bosdyn.client.create_standard_sdk('EvalClient')
     # robot = sdk.create_robot("192.168.80.3")
     robot = sdk.create_robot("10.0.0.3")
     bosdyn.client.util.authenticate(robot)
     robot.time_sync.wait_for_sync()
-
     rr.init('eval')
     rr.connect()
-
     lease_client = robot.ensure_client(LeaseClient.default_service_name)
     robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
     manipulation_api_client = robot.ensure_client(ManipulationApiClient.default_service_name)
@@ -193,24 +178,55 @@ def main():
     lease_client.take()
     setup(robot)
     command_client = robot.ensure_client(RobotCommandClient.default_service_name)
-
     clients = Clients(lease=lease_client, state=robot_state_client, manipulation=manipulation_api_client,
                       image=image_client, raycast=None, command=command_client, robot=robot, recorder=None)
-
     # wrap the robot environment
     env = ConqGymEnv(clients, model.config['dataset_kwargs'])
     env = add_octo_env_wrappers(env=env,
                                 config=model.config,
                                 dataset_statistics=dict(model.dataset_statistics),
                                 normalization_type="normal",
-                                exec_horizon=args.exec_horizon)
-
+                                exec_horizon=args.exec_horizon,
+                                **wrapper_kwargs)
     blocking_stand(command_client, timeout_sec=10)
+    return clients, env, model
 
-    rng = jax.random.PRNGKey(1)
+
+def run_dataset_replay(args):
+    clients, env, _ = setup_robot_and_model(args, no_normalization=True)
+
+    pkls_root = Path("../conq_hose_manipulation_dataset_builder/conq_hose_manipulation/pkls")
+    with (LeaseKeepAlive(clients.lease, must_acquire=True, return_at_exit=True)):
+
+        for pkl_path in pkls_root.glob("*train*.pkl"):
+            with pkl_path.open('rb') as f:
+                data = pickle.load(f)
+
+            open_gripper(clients)
+            look_cmd = hand_pose_cmd(clients, 0.8, 0, 0.2, 0, np.deg2rad(0), 0, duration=0.5)
+            blocking_arm_command(clients, look_cmd)
+
+            obs, _ = env.reset()
+
+            last_t = time.time()
+            for step in data['steps']:
+                action = step['action']
+
+                env.step(action)
+                now = time.time()
+                dt = now - last_t
+                print(f"dt {dt:.3f}")
+                last_t = now
+        print("done!")
+
+
+def run_eval_model(args):
+    clients, env, model = setup_robot_and_model(args)
+
     goal_instruction = "grasp hose"
-
-    with (LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True)):
+    rng = jax.random.PRNGKey(1)
+    n_episodes = 10
+    with (LeaseKeepAlive(clients.lease, must_acquire=True, return_at_exit=True)):
 
         for episode_idx in range(n_episodes):
             task = model.create_tasks(texts=[goal_instruction])
@@ -242,6 +258,19 @@ def main():
 
                 if truncated:
                     break
+
+
+def main():
+    np.set_printoptions(suppress=True, linewidth=220, precision=4)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("checkpoint_path", type=Path, help="path up to and including the step number")
+    parser.add_argument("--num-timesteps", type=int, default=50)
+    parser.add_argument("--horizon", type=int, default=1)
+    parser.add_argument("--exec-horizon", type=int, default=1)
+    args = parser.parse_args()
+
+    run_dataset_replay(args)
+    # run_eval_model(args)
 
 
 if __name__ == "__main__":

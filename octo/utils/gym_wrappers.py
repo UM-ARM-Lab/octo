@@ -62,23 +62,25 @@ def add_octo_env_wrappers(
         env: gym Env
         config: PretrainedModel.config
         dataset_statistics: from PretrainedModel.load_dataset_statistics
+
         # Additional (optional) kwargs
-        normalization_type: str for UnnormalizeActionProprio
-        exec_horizon: int for RHCWrapper
-        resize_size: None or tuple or list of tuples for ResizeImageWrapper
-        horizon: int for HistoryWrapper
+            normalization_type: str for UnnormalizeActionProprio
+            no_normalization: bool if true, skip normalization
+            exec_horizon: int for RHCWrapper
+            resize_size: None or tuple or list of tuples for ResizeImageWrapper
+            horizon: int for HistoryWrapper
     """
     if "normalization_type" in kwargs:
         normalization_type = kwargs['normalization_type']
     else:
         normalization_type = config["dataset_kwargs"]["common_dataset_kwargs"]["action_proprio_normalization_type"]
 
-    logging.info(
-        "Unnormalizing proprio and actions w/ statistics: ", dataset_statistics
-    )
+    logging.info("Unnormalizing proprio and actions w/ statistics: ", dataset_statistics)
     use_proprio = 'proprio' in config['model']['observation_tokenizers']
     if use_proprio:
         env = UnnormalizeActionProprio(env, dataset_statistics, normalization_type)
+    elif kwargs.get("no_normalization", False):
+        pass
     else:
         env = UnnormalizeAction(env, dataset_statistics, normalization_type)
     exec_horizon = kwargs.get(
@@ -87,10 +89,7 @@ def add_octo_env_wrappers(
 
     logging.info("Running receding horizon control with exec_horizon: ", exec_horizon)
     env = RHCWrapper(env, exec_horizon)
-    resize_size = kwargs.get(
-        "resize_size",
-        config["dataset_kwargs"]["frame_transform_kwargs"]["resize_size"],
-    )
+    resize_size = kwargs.get("resize_size", config["dataset_kwargs"]["frame_transform_kwargs"]["resize_size"])
 
     logging.info("Resizing images w/ parameters", resize_size)
     env = ResizeImageWrapper(env, resize_size)
