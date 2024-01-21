@@ -10,7 +10,7 @@ import gym
 import jax
 import numpy as np
 import rerun as rr
-from bosdyn.client.frame_helpers import get_a_tform_b, VISION_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME, HAND_FRAME_NAME
+from bosdyn.client.frame_helpers import get_a_tform_b, VISION_FRAME_NAME, HAND_FRAME_NAME
 from bosdyn.client.image import ImageClient, build_image_request
 from bosdyn.client.lease import LeaseKeepAlive, LeaseClient
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
@@ -24,7 +24,7 @@ from conq.cameras_utils import source_to_fmt, image_to_opencv
 from conq.clients import Clients
 from conq.data_recorder import get_state_vec
 from conq.hand_motion import hand_pose_cmd
-from conq.manipulation import open_gripper, blocking_arm_command, add_follow_with_body
+from conq.manipulation import open_gripper, blocking_arm_command
 from conq.rerun_utils import viz_common_frames, rr_tform
 from conq.utils import setup
 from octo.model.octo_model import OctoModel
@@ -97,10 +97,8 @@ class ConqGymEnv(gym.Env):
     def step(self, action: ActType) -> Tuple[ObsType, float, bool, bool, dict]:
         t0 = time.time()
 
-        open_fraction = np.clip(action[7], 0., 1.)
+        open_fraction = np.clip(action[6], 0., 1.)
 
-        # target_hand_in_body = SE3Pose(x=action[0], y=action[1], z=action[2],
-        #                               rot=Quat(action[3], action[4], action[5], action[6]))
         target_hand_in_vision = self.get_new_hand_in_vision(action)
 
         # FIXME: VR_CMD_PERIOD is constant, but different models may have been trained with different values
@@ -108,7 +106,7 @@ class ConqGymEnv(gym.Env):
                                                                  VISION_FRAME_NAME,
                                                                  seconds=ARM_POSE_CMD_DURATION)
         cmd = arm_cmd
-        # FIXME: does absolute hand pose in body frame commands even work if you turn on add_follow_with_body?
+        # FIXME: add this back?
         # cmd = add_follow_with_body(arm_cmd)
 
         # Add gripper command
@@ -117,38 +115,31 @@ class ConqGymEnv(gym.Env):
         # Execute!
         self.clients.command.robot_command(cmd_with_gripper)
 
-        # FIXME: how to set trunc? Are we sure it should be the same as "is_terminal" in the action?
-        trunc = action[-1] > 0.95
         obs = self.get_obs()
 
         # Sleep to achieve the desired control frequency
         # also nice to visualize the arm moving
-        sleep_dt = ARM_POSE_CMD_PERIOD - (time.time() - t0) - 1e-3
+        # FIXME: this isn't going to be robust to change in exec_window,
+        #  and that 0.01 constant is sort of made up, to approximate the speed of the model...
+        sleep_dt = ARM_POSE_CMD_PERIOD - (time.time() - t0) - 0.06
         if sleep_dt > 0:
             time.sleep(sleep_dt)
 
         dt = time.time() - t0
-        rr.log('control_hz', rr.TimeSeriesScalar(1 / dt))
-        # print(f"step dt {dt:.3f}")
+        rr.log('inner_control_hz', rr.TimeSeriesScalar(1 / dt))
 
-        return obs, 0.0, False, trunc, {}
+        return obs, 0.0, False, False, {}
 
     def get_new_hand_in_vision(self, action):
         state = self.clients.state.get_robot_state()
         snapshot = state.kinematic_state.transforms_snapshot
-        body_in_vision = get_a_tform_b(snapshot, VISION_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
-        hand_in_body = get_a_tform_b(snapshot, GRAV_ALIGNED_BODY_FRAME_NAME, HAND_FRAME_NAME)
+        hand_in_vision = get_a_tform_b(snapshot, VISION_FRAME_NAME, HAND_FRAME_NAME)
 
         # Action is an 8 dim vector, and if you look at the features.json you'll find its meaning:
-        # [ dx, dy, dz, droll, dpitch, dyaw, open_fraction, is_terminal ]
-        # where the delta position and orientation is in the current body frame
-        # First we're going to take the deltas in current body frame,
-        # and apply it to the current hand in body frame to get the new hand in body frame
+        # [ dx, dy, dz, droll, dpitch, dyaw, open_fraction, is_terminal ] all in hand frame
         delta_hand_in_hand = SE3Pose(x=action[0], y=action[1], z=action[2],
                                      rot=Quat(*my_euler_to_quat([action[3], action[4], action[5]])))
-        target_hand_in_body = hand_in_body * delta_hand_in_hand
-        # Now we need to transform the new hand in body frame into the new hand in vision frame
-        target_hand_in_vision = body_in_vision * target_hand_in_body
+        target_hand_in_vision = hand_in_vision * delta_hand_in_hand
 
         # for viz in rerun
         viz_common_frames(snapshot)
@@ -182,13 +173,41 @@ def setup_robot_and_model(args, **wrapper_kwargs):
                       image=image_client, raycast=None, command=command_client, robot=robot, recorder=None)
     # wrap the robot environment
     env = ConqGymEnv(clients, model.config['dataset_kwargs'])
+
+    from octo.data.utils.data_utils import NormalizationType
+    dataset_kwargs = {
+        'name': 'conq_hose_manipulation',
+        'data_dir': Path("~/tensorflow_datasets").expanduser(),
+        # QUESTION: how do these keys relate to the dataset or the model head names?
+        'image_obs_keys': {"wrist": "hand_color_image", "primary": "frontright_fisheye_image"},
+        'state_obs_keys': None,
+        'language_key': "language_instruction",
+        'action_proprio_normalization_type': NormalizationType.NORMAL,
+        'absolute_action_mask': [False, False, False, False, False, False, True],
+    }
+    from octo.data.dataset import make_single_dataset
+    ft_dataset, full_dataset_name = make_single_dataset(
+        dataset_kwargs=dataset_kwargs,
+        traj_transform_kwargs=dict(
+            window_size=2,
+            future_action_window_size=4 - 1,  # so we get pred_horizon actions for our action chunk
+        ),
+        frame_transform_kwargs=dict(
+            resize_size={
+                "primary": (256, 256),
+                "wrist": (128, 128),
+            },
+        ),
+        train=True,
+    )
+    ft_dataset.dataset_statistics
+
     env = add_octo_env_wrappers(env=env,
                                 config=model.config,
-                                dataset_statistics=dict(model.dataset_statistics),
+                                dataset_statistics=ft_dataset.dataset_statistics,
                                 normalization_type="normal",
                                 exec_horizon=args.exec_horizon,
                                 **wrapper_kwargs)
-    blocking_stand(command_client, timeout_sec=10)
     return clients, env, model
 
 
@@ -232,6 +251,7 @@ def run_eval_model(args):
             task = model.create_tasks(texts=[goal_instruction])
 
             # NOTE: should probably match the starting pose of the robot to the starting pose of the dataset
+            blocking_stand(clients.command, timeout_sec=10)
             open_gripper(clients)
             look_cmd = hand_pose_cmd(clients, 0.8, 0, 0.2, 0, np.deg2rad(0), 0, duration=0.5)
             blocking_arm_command(clients, look_cmd)
@@ -241,6 +261,7 @@ def run_eval_model(args):
 
             # do rollout
             t = 0
+            last_t = time.time()
             while t < args.num_timesteps:
                 for img_key, img_src in env.image_obs_keys.items():
                     if img_src is not None:
@@ -256,6 +277,12 @@ def run_eval_model(args):
 
                 t += 1
 
+                now = time.time()
+                dt = now - last_t
+                rr.log('outer_control_hz', rr.TimeSeriesScalar(1 / dt))
+                # print(f"step dt {dt:.3f}")
+                last_t = now
+
                 if truncated:
                     break
 
@@ -269,8 +296,8 @@ def main():
     parser.add_argument("--exec-horizon", type=int, default=1)
     args = parser.parse_args()
 
-    run_dataset_replay(args)
-    # run_eval_model(args)
+    # run_dataset_replay(args)
+    run_eval_model(args)
 
 
 if __name__ == "__main__":

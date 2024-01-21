@@ -34,8 +34,9 @@ def main():
     parser.add_argument('--obs-window-size', type=int, default=2)
     parser.add_argument('--freeze-transformer', action='store_true',
                         help='Whether to freeze pre-trained transformer weights.')
-    parser.add_argument('--save-dir', type=Path, help='Path to an existing fine-tuning checkpoint directory.', default=Path("checkpoints"))
-    parser.add_argument('--resume-from', type=Path, help='Path to an existing fine-tuning checkpoint directory.')
+    parser.add_argument('--save-dir', type=Path, help='Path to an existing fine-tuning checkpoint directory.',
+                        default=Path("checkpoints"))
+    parser.add_argument('--resume-from', type=str, help='Path to fine-tuning checkpoint directory or hf url.')
     parser.add_argument('--use-proprio', action='store_true', help='Whether to use proprioception.')
     parser.add_argument("--data-dir", type=Path, help="Use to override path to tensorflow datasets.",
                         default=Path("~/tensorflow_datasets").expanduser())
@@ -47,10 +48,6 @@ def main():
     initialize_compilation_cache()
     # prevent tensorflow from using GPU memory since it's only used for data loading
     tf.config.set_visible_devices([], "GPU")
-
-    # setup wandb for logging
-    wandb.init(project="octo")
-    wandb.config.update(args)
 
     # load pre-trained model
     if args.resume_from is None:
@@ -72,7 +69,7 @@ def main():
         'state_obs_keys': ["state"] if args.use_proprio else None,  # I think this key needs to match the dataset
         'language_key': "language_instruction",
         'action_proprio_normalization_type': NormalizationType.NORMAL,
-        'absolute_action_mask': [True, True, True, True, True, True, True, True, True],
+        'absolute_action_mask': [False, False, False, False, False, False, True],
     }
     dataset, full_dataset_name = make_single_dataset(
         dataset_kwargs=dataset_kwargs,
@@ -96,7 +93,6 @@ def main():
         .iterator()
     )
 
-    wandb.config['full_dataset_name'] = full_dataset_name
     print(f"Dataset loaded: {full_dataset_name}")
 
     # run text tokenizer over batch (this needs to happen before training / sharding) + delete unused keys
@@ -116,37 +112,20 @@ def main():
         model = pretrained_model
 
     model.config['dataset_kwargs'].update(dataset_kwargs)
-    wandb.config["dataset_kwargs"] = dataset_kwargs
+
+    # setup wandb for logging
+    wandb.init(project="octo")
+    wandb.config.update(args)
+    wandb.config['full_dataset_name'] = full_dataset_name
+
     fine_tune(args, model, train_data_iter)
 
 
 def modify_model(args, pretrained_model, dataset, train_data_iter):
     example_batch = next(train_data_iter)
 
-    # start from pre-training config and modify
     config = pretrained_model.config
-    # del config["model"]["observation_tokenizers"]["wrist"]
-    if args.use_proprio:
-        config["model"]["observation_tokenizers"]["proprio"] = ModuleSpec.create(
-            LowdimObsTokenizer,
-            n_bins=256,
-            bin_type="normal",
-            # FIXME: check what low and high should be!
-            low=-2.0,
-            high=2.0,
-            # FIXME: why is this "proprio" and not "state"? is it to match the named used in the dataset?
-            obs_keys=["proprio"],
-        )
-    # Fully override the old action head with a new one (for smaller changes, you can use update_module_config)
-    config["model"]["heads"]["action"] = ModuleSpec.create(
-        L1ActionHead,
-        pred_horizon=args.pred_horizon,
-        action_dim=example_batch["action"].shape[-1],
-        readout_key="readout_action",
-    )
-    # initialize weights for modified Octo model, then merge in all applicable pre-trained weights
-    # new position encodings for proprio inputs & weights for new action head will remain "from scratch"
-    print("Updating model for new observation & action space...")
+
     model = OctoModel.from_config(
         config,
         example_batch,
@@ -155,8 +134,6 @@ def modify_model(args, pretrained_model, dataset, train_data_iter):
         dataset_statistics=dataset.dataset_statistics,
     )
     merged_params = merge_params(model.params, pretrained_model.params)
-    # can perform any additional parameter surgery here...
-    # ...
     model = model.replace(params=merged_params)
     return model
 
